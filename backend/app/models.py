@@ -175,6 +175,19 @@ class Policy(Timestamps, Base):
     source_text: Mapped[str | None]
 
 
+# Why a decision is where it is (D20).
+REASONS = (
+    "rule_matched",
+    "policy_default",
+    "no_policy",
+    "human",
+    "timeout",
+    "after_hours",
+    "no_eligible_approver",
+    "cancelled",
+)
+
+
 class Decision(Timestamps, Base):
     __tablename__ = "decisions"
     __table_args__ = (
@@ -199,6 +212,7 @@ class Decision(Timestamps, Base):
             "decided_by <> 'timeout' OR outcome IN ('defer', 'decline')",
             name="timeout_never_approves",
         ),
+        CheckConstraint(f"reason IN ({', '.join(repr(r) for r in REASONS)})", name="reason"),
     )
     id: Mapped[str] = pk("dec")
     agency_id: Mapped[str] = mapped_column(ForeignKey("agencies.id"))
@@ -216,6 +230,8 @@ class Decision(Timestamps, Base):
     rule_id: Mapped[str | None]
     outcome: Mapped[str | None]
     value: Mapped[Decimal | None]
+    say: Mapped[str | None]  # the line the agent should speak now; scrubbed with context
+    reason: Mapped[str | None]
     decided_by: Mapped[str | None]
     decided_by_person_id: Mapped[str | None] = mapped_column(ForeignKey("people.id"))
     late_outcome: Mapped[str | None]

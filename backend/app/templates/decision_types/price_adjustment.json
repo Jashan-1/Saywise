@@ -1,0 +1,31 @@
+{
+  "decision_type": "price_adjustment",
+  "label": "Price adjustment",
+  "amount_label": "discount ($)",
+  "rules": [
+    {
+      "id": "small_discount",
+      "when": { "all": [{ "var": "amount", "op": "<=", "value": 50 }] },
+      "then": "approve",
+      "say": "Good news, we can do that."
+    },
+    {
+      "id": "repeat_customer",
+      "when": {
+        "all": [
+          { "var": "history.approved_count", "op": ">=", "value": 3 },
+          { "var": "amount", "op": "<=", "value": 75 }
+        ]
+      },
+      "then": "approve",
+      "say": "Since you're a returning customer, we can do that."
+    },
+    {
+      "id": "too_large",
+      "when": { "all": [{ "var": "amount", "op": ">", "value": 150 }] },
+      "then": "decline",
+      "say": "I'm sorry, that's more than we're able to take off."
+    }
+  ],
+  "default": "escalate"
+}

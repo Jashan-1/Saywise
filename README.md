@@ -91,7 +91,7 @@ curl -X POST localhost:8000/v1/decisions \
   "status": "decided",
   "outcome": "approve",
   "decided_by": "policy",
-  "say": "Good news, we can do 800."
+  "say": "Good news, we can do that."
 }
 ```
 

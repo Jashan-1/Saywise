@@ -1,0 +1,32 @@
+{
+  "decision_type": "price_adjustment",
+  "label": "Price adjustment",
+  "amount_label": "discount ($)",
+  "rules": [
+    {
+      "id": "r1",
+      "when": { "all": [{ "var": "amount", "op": "<=", "value": 50 }] },
+      "then": "approve",
+      "say": "Good news, we can do {context.requested}."
+    },
+    {
+      "id": "r2",
+      "when": {
+        "all": [
+          { "var": "history.approved_count", "op": ">=", "value": 3 },
+          { "var": "amount", "op": "<=", "value": 75 }
+        ]
+      },
+      "then": "approve",
+      "say": "Since you're a repeat customer, we can do that."
+    },
+    {
+      "id": "r3",
+      "when": { "all": [{ "var": "amount", "op": ">", "value": 150 }] },
+      "then": "decline",
+      "say": "The best I can do is {context.quoted}."
+    }
+  ],
+  "default": "escalate",
+  "overrides": { "deadlines": { "live_ms": 25000 }, "after_hours": "on_call" }
+}

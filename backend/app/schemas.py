@@ -247,3 +247,128 @@ class ApiKeyCreated(ApiKeyOut):
 class CallbackSecretOut(BaseModel):
     version: int
     secret: str  # shown once
+
+
+# --- policies (§8) ------------------------------------------------------------------------------
+
+DECISION_TYPE_PATTERN = r"^[a-z][a-z0-9_]{1,49}$"
+DecisionType = Annotated[str, StringConstraints(pattern=DECISION_TYPE_PATTERN)]
+VarPath = Annotated[
+    str, StringConstraints(pattern=r"^(amount|type|(context|history)(\.[A-Za-z0-9_]+)+)$")
+]
+RuleId = Annotated[str, StringConstraints(pattern=r"^[A-Za-z0-9_-]{1,40}$")]
+Op = Literal["==", "!=", "<", "<=", ">", ">=", "in", "not_in", "exists"]
+
+
+class Compare(_In):
+    var: VarPath
+    op: Op
+    value: Any = None
+
+
+class AllOf(_In):
+    all: list["Condition"] = Field(min_length=1)
+
+
+class AnyOf(_In):
+    any: list["Condition"] = Field(min_length=1)
+
+
+class Not(_In):
+    not_: "Condition" = Field(alias="not")
+
+
+type Condition = Compare | AllOf | AnyOf | Not
+
+
+class Rule(_In):
+    id: RuleId
+    when: Condition
+    then: Literal["approve", "decline", "counter", "escalate"]
+    value: Money | None = None
+    say: str | None = Field(None, max_length=300)
+
+    @model_validator(mode="after")
+    def _counter_has_value(self) -> Self:
+        if (self.then == "counter") != (self.value is not None):
+            raise ValueError("a counter rule needs a value, and only a counter rule has one")
+        return self
+
+
+class PolicyBody(_In):
+    decision_type: DecisionType | None = None
+    label: Name
+    amount_label: str | None = Field(None, max_length=100)
+    rules: list[Rule] = Field(default_factory=list, max_length=100)
+    default: Literal["approve", "decline", "escalate"] = "escalate"
+    overrides: ClientSettings = Field(default_factory=ClientSettings)  # validated like a layer
+
+    @model_validator(mode="after")
+    def _unique_rule_ids(self) -> Self:
+        ids = [rule.id for rule in self.rules]
+        if len(ids) != len(set(ids)):
+            raise ValueError("rule ids must be unique")
+        return self
+
+    def stored(self) -> dict[str, Any]:
+        """What gets saved: only the fields the caller set, so overrides stay partial."""
+        return self.model_dump(mode="json", by_alias=True, exclude_unset=True)
+
+
+class PolicyOut(_Out):
+    id: str
+    decision_type: str
+    scope_type: str
+    scope_id: str
+    version: int
+    active: bool
+    source: str
+    created_by: str | None
+    body: dict[str, Any]
+    created_at: datetime
+
+
+# --- decisions (§7, §13) --------------------------------------------------------------------
+
+
+class Subject(_In):
+    customer_ref: str | None = Field(None, max_length=200)
+    amount: Money | None = None
+
+
+class DecisionIn(_In):
+    location_id: str | None = None  # implied by a location-scoped key
+    type: DecisionType
+    mode: Literal["live", "async"] = "live"
+    summary: str = Field(min_length=1, max_length=1000)
+    subject: Subject = Field(default_factory=Subject)
+    context: dict[str, Any] = Field(default_factory=dict)
+    wait_ms: int | None = Field(None, ge=0, le=25_000)  # long-poll budget (§7.1)
+    deadline_ms: int | None = Field(None, ge=1)  # may only lower the resolved deadline
+    max_fanout: int | None = Field(None, ge=1)  # may only lower the resolved fan-out
+    callback_url: HttpsUrl | None = None
+
+
+class PolicyRef(BaseModel):
+    id: str
+    version: int
+    rule_id: str | None
+
+
+class DecisionOut(BaseModel):
+    id: str
+    location_id: str
+    type: str
+    mode: str
+    status: str
+    outcome: str | None
+    value: Money | None
+    decided_by: str | None
+    approver: dict[str, str] | None = None
+    ai_recommendation: str | None = None
+    say: str | None
+    reason: str | None
+    policy: PolicyRef | None
+    deadline_at: datetime
+    poll_after_ms: int | None = None
+    created_at: datetime

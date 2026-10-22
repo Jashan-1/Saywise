@@ -9,7 +9,9 @@ from app.models import Agency, Business, Location, Policy
 Scope = tuple[str, str]  # (scope_type, scope_id)
 SYSTEM: Scope = ("system", "system")
 
-Action = Literal["read", "approve", "edit_rules", "manage_people", "manage_settings", "manage_org"]
+Action = Literal[
+    "read", "decide", "approve", "edit_rules", "manage_people", "manage_settings", "manage_org"
+]
 
 # §5.3. Scope ("agency subtree" / "own scope") comes from where the membership sits.
 ROLE_ACTIONS: dict[str, frozenset[str]] = {
