@@ -20,8 +20,8 @@ from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine  # noqa: E4
 
 from app.core.db import engine, get_session  # noqa: E402
 from app.main import create_app  # noqa: E402
-from app.models import Agency, Business, Location  # noqa: E402
-from scripts.create_agency import create_agency, issue_key  # noqa: E402
+from app.models import Agency, ApiKey, Business, Location  # noqa: E402
+from scripts.create_agency import create_agency  # noqa: E402
 
 
 @pytest.fixture(scope="session", autouse=True)
@@ -93,8 +93,9 @@ def make_tree(session: AsyncSession) -> Callable[[str], Awaitable[Tree]]:
         ]
         session.add_all(locations)
         await session.flush()
-        business_key = issue_key(session, agency.id, "business", business.id)
-        location_key = issue_key(session, agency.id, "location", locations[0].id)
+        business_row, business_key = ApiKey.issue(agency.id, "business", business.id)
+        location_row, location_key = ApiKey.issue(agency.id, "location", locations[0].id)
+        session.add_all([business_row, location_row])
         await session.commit()
         return Tree(agency, business, *locations, agency_key, business_key, location_key)
 

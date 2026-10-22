@@ -30,7 +30,7 @@ async def get_principal(
     # shortcut: one UPDATE per request; throttle to once a minute if it shows up in profiles.
     row.last_used_at = utcnow()
     await session.commit()
-    return Principal(agency_id=row.agency_id, scope=(row.scope_type, row.scope_id))
+    return Principal(agency_id=row.agency_id, scope=(row.scope_type, row.scope_id), key_id=row.id)
 
 
 PrincipalDep = Annotated[Principal, Depends(get_principal)]

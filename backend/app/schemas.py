@@ -1,5 +1,6 @@
+from datetime import datetime
 from decimal import Decimal
-from typing import Annotated, Any, ClassVar, Literal, Self
+from typing import Annotated, Any, ClassVar, Literal, Self, get_args
 from zoneinfo import ZoneInfo
 
 from pydantic import (
@@ -26,11 +27,23 @@ E164 = Annotated[str, StringConstraints(pattern=r"^\+[1-9]\d{6,14}$")]
 HttpsUrl = Annotated[AnyUrl, UrlConstraints(allowed_schemes=["https"], max_length=2083)]
 
 Day = Literal["mon", "tue", "wed", "thu", "fri", "sat", "sun"]
-# "HH:MM-HH:MM" in the location's timezone; an end before the start wraps past midnight.
+
+
+def _distinct_ends(v: str) -> str:
+    if v[:5] == v[6:]:
+        raise ValueError("a window's start and end must differ")
+    return v
+
+
+# "HH:MM-HH:MM" in the location's timezone. An end before the start crosses midnight, and the
+# window belongs to the day it starts on (D18).
 TimeRange = Annotated[
-    str, StringConstraints(pattern=r"^([01]\d|2[0-3]):[0-5]\d-([01]\d|2[0-3]):[0-5]\d$")
+    str,
+    StringConstraints(pattern=r"^([01]\d|2[0-3]):[0-5]\d-([01]\d|2[0-3]):[0-5]\d$"),
+    AfterValidator(_distinct_ends),
 ]
 WeeklySchedule = dict[Day, list[TimeRange]]
+DEFAULT_CONTACT_HOURS: dict[Day, list[str]] = {day: ["07:00-21:00"] for day in get_args(Day)}
 
 
 def _known_timezone(v: str) -> str:
@@ -102,7 +115,10 @@ class Retention(_In):
 class ClientSettings(_In):
     deadlines: Deadlines = Field(default_factory=Deadlines)
     escalation: Escalation = Field(default_factory=Escalation)
-    quiet_hours: WeeklySchedule | None = None
+    # When people may be texted; null means any time (D18).
+    contact_hours: WeeklySchedule | None = Field(
+        default_factory=lambda: dict(DEFAULT_CONTACT_HOURS)
+    )
     after_hours: Literal["defer", "on_call"] = "defer"
     on_timeout: OnTimeout = Field(default_factory=OnTimeout)
     ai: Ai = Field(default_factory=Ai)
@@ -173,19 +189,19 @@ class MembershipIn(_In):
     authority_limit: Money = Decimal(0)
     can_approve: bool = True
     on_call: bool = False
-    on_hours: WeeklySchedule | None = None  # null: inherit the scope's schedule
+    contact_hours: WeeklySchedule | None = None  # null: use the scope's contact_hours
     max_asks_per_hour: int | None = Field(None, ge=1)
 
 
 class MembershipPatch(_Patch):
-    NULLABLE = frozenset({"on_hours", "max_asks_per_hour"})
+    NULLABLE = frozenset({"contact_hours", "max_asks_per_hour"})
 
     display_name: Name | None = None
     role: Role | None = None
     authority_limit: Money | None = None
     can_approve: bool | None = None
     on_call: bool | None = None
-    on_hours: WeeklySchedule | None = None
+    contact_hours: WeeklySchedule | None = None
     max_asks_per_hour: int | None = Field(None, ge=1)
     active: bool | None = None
 
@@ -201,6 +217,33 @@ class MembershipOut(_Out):
     authority_limit: Money
     can_approve: bool
     on_call: bool
-    on_hours: dict[str, Any] | None
+    contact_hours: dict[str, Any] | None
     max_asks_per_hour: int | None
     active: bool
+
+
+# --- API keys and callback secrets -----------------------------------------------------------
+
+
+class ApiKeyIn(_In):
+    scope_type: ScopeType
+    scope_id: str
+
+
+class ApiKeyOut(_Out):
+    id: str
+    scope_type: str
+    scope_id: str
+    prefix: str
+    created_at: datetime
+    last_used_at: datetime | None
+    revoked_at: datetime | None
+
+
+class ApiKeyCreated(ApiKeyOut):
+    key: str  # shown once
+
+
+class CallbackSecretOut(BaseModel):
+    version: int
+    secret: str  # shown once

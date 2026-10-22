@@ -6,7 +6,7 @@ from pydantic import ValidationError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models import Policy
-from app.services.settings import merge, merge_patch, resolve, tighten, validate_layer
+from app.services.settings import apply_patch, merge, resolve, tighten, validate_layer
 from tests.conftest import auth
 
 
@@ -38,10 +38,10 @@ from tests.conftest import auth
         # Leaves are replaced whole, even when they are dicts.
         (
             [
-                ("agency:a", {"quiet_hours": {"mon": ["22:00-07:00"]}}),
-                ("business:b", {"quiet_hours": {"sun": ["00:00-23:59"]}}),
+                ("agency:a", {"contact_hours": {"mon": ["22:00-07:00"]}}),
+                ("business:b", {"contact_hours": {"sun": ["00:00-23:59"]}}),
             ],
-            "quiet_hours",
+            "contact_hours",
             {"sun": ["00:00-23:59"]},
             "business:b",
         ),
@@ -74,9 +74,13 @@ def test_merge(layers: list[Any], path: str, value: Any, origin: str) -> None:
         ({"after_hours": "ask_everyone"}, False),
         ({"callback_url": "http://example.com/hook"}, False),  # https only
         ({"callback_url": "https://example.com/hook"}, True),
-        ({"quiet_hours": {"mon": ["22:00-07:00"]}}, True),
-        ({"quiet_hours": {"mon": ["25:00-07:00"]}}, False),
-        ({"quiet_hours": {"someday": ["09:00-17:00"]}}, False),
+        ({"contact_hours": {"mon": ["22:00-07:00"]}}, True),
+        ({"contact_hours": {"mon": ["25:00-07:00"]}}, False),
+        ({"contact_hours": {"someday": ["09:00-17:00"]}}, False),
+        ({"contact_hours": {"mon": ["09:00-09:00"]}}, False),  # ambiguous: zero or 24 h
+        ({"contact_hours": None}, True),  # any time
+        ({"contact_hours": {}}, True),  # never
+        ({"deadlines": {"live_ms": None}}, False),
         ({"unknown_knob": 1}, False),
         ({"deadlines": {"unknown": 1}}, False),
         ({"deadlines": 5}, False),
@@ -94,24 +98,28 @@ def test_validate_layer(partial: dict[str, Any], ok: bool) -> None:
     ("stored", "patch", "expected"),
     [
         ({}, {"after_hours": "on_call"}, {"after_hours": "on_call"}),
-        ({"after_hours": "on_call"}, {"after_hours": None}, {}),  # null = inherit again
+        ({}, {"contact_hours": None}, {"contact_hours": None}),  # null is a value: any time
+        (
+            {"escalation": {"two_person_over": 500}},
+            {"escalation": {"two_person_over": None}},
+            {"escalation": {"two_person_over": None}},
+        ),
         (
             {"deadlines": {"live_ms": 9000}},
             {"deadlines": {"async_ms": 60000}},
             {"deadlines": {"live_ms": 9000, "async_ms": 60000}},
         ),
-        ({"deadlines": {"live_ms": 9000}}, {"deadlines": {"live_ms": None}}, {}),
         (
-            {"quiet_hours": {"mon": ["22:00-07:00"]}},
-            {"quiet_hours": {"tue": ["22:00-07:00"]}},
-            {"quiet_hours": {"tue": ["22:00-07:00"]}},
+            {"contact_hours": {"mon": ["22:00-07:00"]}},
+            {"contact_hours": {"tue": ["22:00-07:00"]}},
+            {"contact_hours": {"tue": ["22:00-07:00"]}},
         ),
     ],
 )
-def test_merge_patch(
+def test_apply_patch(
     stored: dict[str, Any], patch: dict[str, Any], expected: dict[str, Any]
 ) -> None:
-    assert merge_patch(stored, patch) == expected
+    assert apply_patch(stored, patch) == expected
 
 
 def test_request_can_only_tighten() -> None:
@@ -233,9 +241,27 @@ async def test_settings_api_patch_and_resolved_origins(
     assert r.json()["settings"]["deadlines"]["live_ms"] == 20000
     assert r.json()["origins"]["deadlines.live_ms"] == f"agency:{t.agency.id}"
 
-    # null removes the override.
-    await client.patch(
-        f"/v1/settings/location/{t.location.id}", json={"deadlines": {"live_ms": None}}, headers=h
+    # null is a value: this location may text people at any time.
+    r = await client.patch(
+        f"/v1/settings/location/{t.location.id}", json={"contact_hours": None}, headers=h
     )
+    assert r.json()["contact_hours"] is None
+    r = await client.get("/v1/settings/resolved", params={"location_id": t.location.id}, headers=h)
+    assert r.json()["settings"]["contact_hours"] is None
+    assert r.json()["origins"]["contact_hours"] == f"location:{t.location.id}"
+
+    # PUT replaces the overrides; whatever it leaves out inherits again.
+    r = await client.put(
+        f"/v1/settings/location/{t.location.id}", json={"after_hours": "on_call"}, headers=h
+    )
+    assert r.status_code == 200 and r.json() == {"after_hours": "on_call"}
     r = await client.get("/v1/settings/resolved", params={"location_id": t.location.id}, headers=h)
     assert r.json()["settings"]["deadlines"]["live_ms"] == 20000
+    assert r.json()["settings"]["contact_hours"]["mon"] == ["07:00-21:00"]
+    assert r.json()["origins"]["contact_hours"] == "default"
+    r = await client.put(
+        f"/v1/settings/location/{t.location.id}",
+        json={"on_timeout": {"outcome": "approve"}},
+        headers=h,
+    )
+    assert r.status_code == 422

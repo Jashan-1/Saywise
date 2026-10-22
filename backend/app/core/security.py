@@ -24,6 +24,12 @@ def verify_key(key: str, key_hash: str) -> bool:
     return hmac.compare_digest(hash_key(key).encode(), key_hash.encode())
 
 
+def callback_secret(signing_secret: bytes, agency_id: str, version: int) -> str:
+    """The agency's callback signing secret (D17). Bumping `version` rotates it."""
+    mac = hmac.new(signing_secret, f"{agency_id}:{version}".encode(), hashlib.sha256)
+    return f"whsec_{mac.hexdigest()}"
+
+
 def _token_sig(data: str, exp: int, secret: bytes) -> str:
     mac = hmac.new(secret, f"{data}.{exp}".encode(), hashlib.sha256).digest()
     return base64.urlsafe_b64encode(mac).rstrip(b"=").decode()

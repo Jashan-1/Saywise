@@ -79,7 +79,7 @@ You are building **SaySo**, a real-time decision and human-in-the-loop API for A
 
 - `channels/base.py` (protocol) and `channels/twilio_sms.py` (Twilio REST via httpx). `FakeChannel` for tests.
 - `services/sms_commands.py`: the pure reply parser for the grammar in §10.2. Rule-change text is recognized but returns "not yet supported" until phase 7.
-- `services/escalation.py`, part 1: eligible approvers from memberships on the scope chain (§9.1, without stats), one at a time by authority, fixed wait, and the message format from §10.1 without the AI line. Short codes are unique among all open decisions.
+- `services/escalation.py`, part 1: eligible approvers from memberships on the scope chain (§9.1, without stats), one at a time by authority, fixed wait, and the message format from §10.1 without the AI line. Short codes are 3 characters, unique among all open decisions (§10.2, D16).
 - `services/decisions.resolve()`: conditional `UPDATE ... RETURNING`, plus `NOTIFY` in the same transaction.
 - `services/waiter.py`: one LISTEN connection per process, futures by id, a re-check after subscribing, and cleanup.
 - `POST /v1/decisions` with `escalate` sends the first ask inline, then waits `wait_ms`. It returns the decision, or `pending` with `hold_say` and `poll_after_ms`. `GET` long-polls up to 25 s.
@@ -106,7 +106,7 @@ You are building **SaySo**, a real-time decision and human-in-the-loop API for A
 
 - `app/worker.py`: an asyncio loop with SIGTERM handling. `SKIP LOCKED` claiming, `advance()` or `expire()`.
 - `after_hours` behavior (§9.1): `defer` expires immediately; `on_call` asks members with `on_call=true`.
-- Late answers are stored as `late_outcome`, with the `decision.late_answer` event.
+- Late answers within `LATE_ANSWER_WINDOW` are stored as `late_outcome`, with the `decision.late_answer` event (D16).
 - `services/callbacks.py`: the outbox, HMAC signing, exponential backoff, and the SSRF guard.
 - `POST /v1/decisions/{id}/cancel`. `mode:"async"` returns `202`.
 
@@ -122,7 +122,7 @@ You are building **SaySo**, a real-time decision and human-in-the-loop API for A
 ## Phase 5 — Adaptive escalation
 
 - `services/history.py`: approver `p_answer(window)` and `t80` from `decision_asks` (one SQL query with `percentile_cont`), a 5-minute in-process cache, and cold-start constants.
-- The pure `escalation.plan_step()` from §9.3, respecting `max_fanout`, `on_hours`/`quiet_hours`, load caps and the two-person rule. `advance()` becomes a thin wrapper.
+- The pure `escalation.plan_step()` from §9.3, respecting `max_fanout`, `contact_hours`, load caps and the two-person rule. `advance()` becomes a thin wrapper.
 
 **Tests:** about 15 planner cases (cold start, k=1 for a strong approver, fan-out up to max, off-hours skip, load cap, window shrinking near the deadline, two-person rule).
 
@@ -131,7 +131,7 @@ You are building **SaySo**, a real-time decision and human-in-the-loop API for A
 - `history.customer_facts()` per §12, scoped to the business and injected into the facts.
 - `services/suggestions.py`: a nightly job claimed via `worker_jobs`. `GET /v1/suggestions` and `POST /v1/suggestions/{id}/adopt` (writes a new version; never automatic).
 - `GET /v1/usage` aggregates decisions, asks and AI calls per scope and month.
-- `services/retention.py`: a daily job that scrubs `context`, `summary` and AI text past the resolved `retention.context_days`.
+- `services/retention.py`: a daily job that scrubs `context`, `summary`, `say` and AI text past the resolved `retention.context_days`.
 
 **Tests:**
 - a repeat customer is approved via a `history.*` rule

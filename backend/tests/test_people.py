@@ -70,7 +70,12 @@ async def test_membership_rules(client: httpx.AsyncClient, make_tree) -> None:
     h, loc = auth(t.agency_key), ("location", t.location.id)  # the 409 below expires `t` rows
     person, r = await add_member(client, t.agency_key, "+14085550102", loc, "Lee")
     m = r.json()
-    assert (m["can_approve"], m["on_call"], m["active"], m["on_hours"]) == (True, False, True, None)
+    assert (m["can_approve"], m["on_call"], m["active"], m["contact_hours"]) == (
+        True,
+        False,
+        True,
+        None,
+    )
 
     _, dup = await add_member(client, t.agency_key, "+14085550102", loc, "Lee again")
     assert dup.status_code == 409
@@ -82,21 +87,21 @@ async def test_membership_rules(client: httpx.AsyncClient, make_tree) -> None:
 
     r = await client.patch(
         f"/v1/memberships/{m['id']}",
-        json={"authority_limit": 150.5, "on_hours": {"mon": ["09:00-17:00"]}, "on_call": True},
+        json={"authority_limit": 150.5, "contact_hours": {"mon": ["09:00-17:00"]}, "on_call": True},
         headers=h,
     )
     assert r.status_code == 200
-    assert (r.json()["authority_limit"], r.json()["on_hours"], r.json()["on_call"]) == (
+    assert (r.json()["authority_limit"], r.json()["contact_hours"], r.json()["on_call"]) == (
         150.5,
         {"mon": ["09:00-17:00"]},
         True,
     )
-    r = await client.patch(f"/v1/memberships/{m['id']}", json={"on_hours": None}, headers=h)
-    assert r.json()["on_hours"] is None
+    r = await client.patch(f"/v1/memberships/{m['id']}", json={"contact_hours": None}, headers=h)
+    assert r.json()["contact_hours"] is None
     for bad in (
         {"display_name": None},
         {"authority_limit": -1},
-        {"on_hours": {"mon": ["9-5"]}},
+        {"contact_hours": {"mon": ["9-5"]}},
         {"scope_id": "x"},
     ):
         assert (

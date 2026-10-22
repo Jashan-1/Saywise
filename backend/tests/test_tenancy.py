@@ -4,7 +4,6 @@ from sqlalchemy import update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models import ApiKey, utcnow
-from scripts.create_agency import issue_key
 from tests.conftest import auth
 
 
@@ -164,7 +163,8 @@ async def test_key_scope_id_from_another_agency_grants_nothing(
     location_id = a.location.id
     # A malformed key row: agency B's key pointing at agency A's location. The key's own
     # agency must also be on the target's chain, so it reaches nothing.
-    key = issue_key(session, b.agency.id, "location", location_id)
+    row, key = ApiKey.issue(b.agency.id, "location", location_id)
+    session.add(row)
     await session.commit()
     assert (await client.get("/v1/businesses", headers=auth(key))).json() == []
     assert (await client.get("/v1/locations", headers=auth(key))).json() == []

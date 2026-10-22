@@ -20,6 +20,8 @@ from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import DeclarativeBase, Mapped, MappedColumn, mapped_column
 from ulid import ULID
 
+from app.core.security import generate_api_key, hash_key, key_prefix
+
 Json = dict[str, Any]
 
 
@@ -70,6 +72,7 @@ class Agency(ScopedSettings, Base):
     __tablename__ = "agencies"
     id: Mapped[str] = pk("agy")
     name: Mapped[str]
+    callback_secret_version: Mapped[int] = mapped_column(default=1, server_default="1")
 
 
 class Business(ScopedSettings, Base):
@@ -99,6 +102,19 @@ class ApiKey(Timestamps, Base):
     last_used_at: Mapped[datetime | None]
     revoked_at: Mapped[datetime | None]
 
+    @classmethod
+    def issue(cls, agency_id: str, scope_type: str, scope_id: str) -> tuple["ApiKey", str]:
+        """A new key row plus the plaintext key, which is never stored."""
+        key = generate_api_key()
+        row = cls(
+            agency_id=agency_id,
+            scope_type=scope_type,
+            scope_id=scope_id,
+            prefix=key_prefix(key),
+            key_hash=hash_key(key),
+        )
+        return row, key
+
 
 class Person(Timestamps, Base):
     """Global and keyed by phone: the shared SMS number means one person can serve many agencies.
@@ -126,7 +142,7 @@ class Membership(Timestamps, Base):
     authority_limit: Mapped[Decimal] = mapped_column(default=Decimal(0), server_default="0")
     can_approve: Mapped[bool] = mapped_column(default=True, server_default=true())
     on_call: Mapped[bool] = mapped_column(default=False, server_default=false())
-    on_hours: Mapped[Json | None]
+    contact_hours: Mapped[Json | None]  # null: use the scope's contact_hours
     max_asks_per_hour: Mapped[int | None]
     active: Mapped[bool] = mapped_column(default=True, server_default=true())
 

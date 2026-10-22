@@ -8,31 +8,18 @@ import sys
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.config import get_settings
 from app.core.db import SessionLocal, engine
-from app.core.security import generate_api_key, hash_key, key_prefix
+from app.core.security import callback_secret
 from app.models import Agency, ApiKey
-
-
-def issue_key(session: AsyncSession, agency_id: str, scope_type: str, scope_id: str) -> str:
-    """Add a key row to the session and return the plaintext key. Only its hash is stored."""
-    key = generate_api_key()
-    session.add(
-        ApiKey(
-            agency_id=agency_id,
-            scope_type=scope_type,
-            scope_id=scope_id,
-            prefix=key_prefix(key),
-            key_hash=hash_key(key),
-        )
-    )
-    return key
 
 
 async def create_agency(session: AsyncSession, name: str) -> tuple[Agency, str]:
     agency = Agency(name=name)
     session.add(agency)
     await session.flush()
-    key = issue_key(session, agency.id, "agency", agency.id)
+    row, key = ApiKey.issue(agency.id, "agency", agency.id)
+    session.add(row)
     await session.commit()
     return agency, key
 
@@ -41,9 +28,11 @@ async def main(name: str) -> None:
     async with SessionLocal() as session:
         agency, key = await create_agency(session, name)
     await engine.dispose()
-    print(f"agency:  {agency.id}")
-    print(f"api key: {key}")
-    print("Store the key now. It is not shown again.")
+    signing = get_settings().signing_secret.get_secret_value().encode()
+    print(f"agency:          {agency.id}")
+    print(f"api key:         {key}")
+    print(f"callback secret: {callback_secret(signing, agency.id, agency.callback_secret_version)}")
+    print("Store both now. They are not shown again (rotate with POST /v1/callback_secret/rotate).")
 
 
 if __name__ == "__main__":

@@ -25,6 +25,11 @@ Status: v0.2 design (after design review) · Owner: Jashan Singh · License: MIT
 | D13 | Language | English now. `locale` setting exists, so per-location language comes later |
 | D14 | Retention | Call context scrubbed after **90 days, configurable per scope** |
 | D15 | API versioning | **Every endpoint is under `/v1`**. Only the infrastructure probes `/healthz` and `/readyz` stay unversioned, by convention |
+| D16 | Late answers | Accepted for **24 h after expiry** (internal constant `LATE_ANSWER_WINDOW`). A reply to a decided decision gets "Handled by X"; a reply past the window or to a cancelled one gets "That request has closed." and never sets `late_outcome` |
+| D17 | Callback signing | **One secret per agency**, derived as `HMAC(SAYSO_SIGNING_SECRET, agency_id + ":" + callback_secret_version)`, so one agency can rotate alone via `POST /v1/callback_secret/rotate` |
+| D18 | Contact hours | `contact_hours` (scope setting and membership column) is when people **may** be texted. Default every day `07:00-21:00` in the decision's location timezone; a window may cross midnight and belongs to the day it starts; `null` = any time. Replaces `quiet_hours` / `on_hours` |
+| D19 | API key management | `POST/GET /v1/api_keys` and `POST /v1/api_keys/{id}/revoke`, agency keys only. A key can't revoke itself |
+| D20 | Decision `say` and `reason` | Stored on `decisions`. `reason` is one of `rule_matched`, `policy_default`, `no_policy`, `human`, `timeout`, `after_hours`, `no_eligible_approver`, `cancelled`. Retention scrubs `say` together with `context` |
 
 ## 1. Problem
 
@@ -176,7 +181,7 @@ An API key is issued at agency, business or location scope. A key can act on its
 | `manager` | ✓ | — | — | Desk / service manager |
 | `approver` | ✓ | — | — | Anyone allowed to say yes or no |
 
-- Membership fields: `role`, `authority_limit`, `can_approve`, `on_call` (bool), `on_hours` (weekly schedule, may be null to inherit), `max_asks_per_hour`, `active`.
+- Membership fields: `role`, `authority_limit`, `can_approve`, `on_call` (bool), `contact_hours` (weekly schedule of when they may be texted; null inherits the scope's `contact_hours`), `max_asks_per_hour`, `active`.
 - **Inheritance:** a business-level manager is eligible for every location under that business.
 - Permissions are checked in one place, `scopes.can(person|key, action, scope)`, with a table-driven test per role.
 
@@ -190,6 +195,7 @@ code defaults → agency.settings → business.settings → location.settings
 ```
 
 - Each scope row has a `settings jsonb` column holding **partial** overrides.
+- `PATCH` sets keys, and `null` is a real value (`contact_hours: null` means any time, `two_person_over: null` means off). `PUT` replaces a scope's overrides, which is how an override is removed so the value inherits again.
 - `settings.resolve(location_id, decision_type, request)` deep-merges the layers, then validates the result against one strict Pydantic model.
 - A bad override is rejected at write time, never discovered at runtime.
 
@@ -201,7 +207,7 @@ code defaults → agency.settings → business.settings → location.settings
 | `deadlines.async_ms` | 3600000 | 60 000 – 7 days |
 | `escalation.max_fanout` | 3 | 1 – 10 |
 | `escalation.two_person_over` | null (off) | ≥ 0 |
-| `quiet_hours` | null | Default schedule for members without their own |
+| `contact_hours` | every day `07:00-21:00` | When people may be texted, for members without their own. Location timezone; a window may cross midnight and belongs to the day it starts; `null` = any time (D18) |
 | `after_hours` | `"defer"` | `"defer"` \| `"on_call"` |
 | `on_timeout.outcome` | `"defer"` | **`"defer"` \| `"decline"` only** (fixed floor) |
 | `on_timeout.say` / `hold_say` | English templates | ≤ 300 chars |
@@ -243,8 +249,11 @@ late human answer ─► late_outcome ─► callback "decision.late_answer"
 
 ```
 pending ──► decided | expired | cancelled
-expired ──► expired + late_outcome
+expired ──► expired + late_outcome     (only within LATE_ANSWER_WINDOW = 24 h of expiry, D16)
 ```
+
+- A reply to a **decided** decision gets "Handled by X ✓".
+- A reply to an **expired** decision past the window, or to a **cancelled** one, gets "That request has closed." and never sets `late_outcome`.
 
 Every transition is one `UPDATE ... WHERE status='pending' RETURNING`, so the first valid answer wins and duplicates are harmless.
 
@@ -291,9 +300,9 @@ Starter templates ship as JSON under `app/templates/decision_types/` and are see
 
 ### 9.1 Eligibility
 
-Approvers are drawn from memberships on the location's scope chain: active, `can_approve`, `authority_limit >= amount`, under their hourly load cap, not opted out of SMS, and inside their `on_hours`, falling back to the scope's `quiet_hours`.
+Approvers are drawn from memberships on the location's scope chain: active, `can_approve`, `authority_limit >= amount`, under their hourly load cap, not opted out of SMS, and inside their `contact_hours`, falling back to the scope's `contact_hours` (D18).
 
-**If nobody is on hours,** `after_hours` decides:
+**If nobody is inside their contact hours,** `after_hours` decides:
 
 - `defer`: expire immediately with the `on_timeout` outcome.
 - `on_call`: ask members with `on_call=true`, ignoring their hours.
@@ -356,7 +365,8 @@ The AI line is omitted if AI is disabled, slow or failing (§11).
 
 - **Shared number, many tenants:** a reply is matched against **all** open asks for that phone number across agencies.
 - If more than one ask is open, a bare `1` gets "Which one? Reply #K7 1 or #M2 1".
-- Short codes are unique among **all** open decisions while the number is shared.
+- Short codes are **3 characters** from an alphabet without `0 O 1 I`. They are unique among **all** open decisions while the number is shared: a partial unique index covers pending decisions, and generation also checks expired decisions still inside the late-answer window and retries on a clash (a partial index can't use `now()`).
+- Replies to decided, cancelled or closed decisions follow §7.3.
 
 ### 10.3 Approval link and inbound security
 
@@ -406,7 +416,7 @@ Owner:  "YES" ─► new policy version at the owner's scope; audit records who/
 - **Customer facts:** `history.decision_count`, `approved_count`, `declined_count`, `last_outcome` and `total_approved_amount` for the same `customer_ref`, **within the same business**. History is never shared across businesses. Caller-supplied facts go in `context` and are trusted as sent.
 - **Rule suggestions:** a nightly job groups human decisions by `(type, amount bucket)` over 60 days. When `n ≥ 10` and the approve rate is `≥ 0.9`, it creates a suggestion. Adopting it via API, or by an owner replying YES to a suggestion SMS, writes a new policy version. **Nothing is applied automatically.**
 - **Usage:** decisions, asks and AI calls are already rows. `GET /v1/usage?scope=&from=&to=` aggregates counts per scope and month. No separate metering table until pricing is decided.
-- **Retention:** a daily job nulls `context`, `summary` and AI text on decisions older than the resolved `retention.context_days`. Outcomes, amounts, timings and `customer_ref` are kept so history and suggestions keep working.
+- **Retention:** a daily job nulls `context`, `summary`, `say` and AI text on decisions older than the resolved `retention.context_days`. Outcomes, amounts, timings and `customer_ref` are kept so history and suggestions keep working.
 
 ## 13. API (all under `/v1`, D15)
 
@@ -420,7 +430,7 @@ Auth: `Authorization: Bearer sk_...` (scoped key). Writes accept an `Idempotency
 | GET | `/v1/decisions?location_id=&status=&from=` | List for audit |
 | POST/GET/PATCH | `/v1/businesses`, `/v1/locations` | Org structure (agency keys) |
 | POST/GET/PATCH | `/v1/people`, `/v1/memberships` | People, roles, authority |
-| GET/PATCH | `/v1/settings/{scope_type}/{scope_id}` | Partial overrides at a scope |
+| GET/PATCH/PUT | `/v1/settings/{scope_type}/{scope_id}` | Partial overrides at a scope (PUT replaces them) |
 | GET | `/v1/settings/resolved` | Merged settings with origin of each value |
 | GET | `/v1/policies/templates` | System starter templates |
 | GET/PUT | `/v1/policies/{type}?scope=` | Read/replace (new version) at a scope |
@@ -428,6 +438,9 @@ Auth: `Authorization: Bearer sk_...` (scoped key). Writes accept an `Idempotency
 | GET | `/v1/policies/{type}/versions` | Version history |
 | GET | `/v1/suggestions`, POST `/v1/suggestions/{id}/adopt` | Rule suggestions |
 | GET | `/v1/usage` | Usage per scope/month |
+| POST/GET | `/v1/api_keys` | Issue a scoped key (shown once) / list keys. Agency keys only (D19) |
+| POST | `/v1/api_keys/{id}/revoke` | Revoke a key. A key can't revoke itself |
+| POST | `/v1/callback_secret/rotate` | New callback signing secret, shown once. Agency keys only (D17) |
 | POST | `/v1/inbound/twilio/sms` | Twilio webhook (signature-verified) |
 | GET/POST | `/v1/approve/{token}` | One-tap approval page |
 | GET | `/healthz`, `/readyz` | Infra probes (unversioned by convention) |
@@ -459,6 +472,7 @@ Idempotency-Key: call_8f2e:discount:1
   "approver": { "id": "per_...", "name": "Raj" },
   "ai_recommendation": "approve",
   "say": "Good news, we can do 800.",
+  "reason": "human",
   "policy": { "id": "pol_...", "version": 7, "rule_id": null },
   "deadline_at": "2026-10-23T10:15:30Z",
   "poll_after_ms": null
@@ -469,18 +483,18 @@ Codes: `401` bad key; `404` unknown id or outside the key's scope; `409` idempot
 
 ## 14. Data model
 
-Ids are prefixed ULIDs (`agy_ bus_ loc_ per_ mem_ key_ pol_ dec_ ask_ cbd_ sug_ aic_`). All rows have `created_at` and `updated_at`.
+Ids are prefixed ULIDs (`agy_ bus_ loc_ per_ mem_ key_ pol_ dec_ ask_ drf_ cbd_ sug_ aic_`). All rows have `created_at` and `updated_at`.
 
 | Table | Key columns |
 |---|---|
-| `agencies` | `name`, `settings` jsonb |
+| `agencies` | `name`, `settings` jsonb, `callback_secret_version` (int, default 1) |
 | `businesses` | `agency_id`, `name`, `settings` |
 | `locations` | `agency_id`, `business_id`, `name`, `timezone`, `settings` |
 | `api_keys` | `agency_id`, `scope_type`, `scope_id`, `prefix`, `key_hash`, `last_used_at`, `revoked_at` |
 | `people` | `phone` (E.164, unique), `sms_opted_out` |
-| `memberships` | `person_id`, `agency_id`, `scope_type`, `scope_id`, `display_name`, `role`, `authority_limit`, `can_approve`, `on_call`, `on_hours` jsonb, `max_asks_per_hour`, `active` |
+| `memberships` | `person_id`, `agency_id`, `scope_type`, `scope_id`, `display_name`, `role`, `authority_limit`, `can_approve`, `on_call`, `contact_hours` jsonb, `max_asks_per_hour`, `active` |
 | `policies` | `agency_id` (null for system), `scope_type`, `scope_id`, `decision_type`, `version`, `body` jsonb, `active`, `created_by` (key or person), `source` (`api/sms/suggestion/clone`), `source_text` |
-| `decisions` | `agency_id`, `location_id`, `type`, `mode`, `status`, `summary`, `subject`, `context`, `customer_ref`, `amount`, `policy_id`, `policy_version`, `rule_id`, `outcome`, `value`, `decided_by`, `decided_by_person_id`, `late_outcome`, `short_code`, `deadline_at`, `next_action_at`, `callback_url`, `idempotency_key`, `request_hash`, `context_scrubbed_at`, `decided_at` |
+| `decisions` | `agency_id`, `location_id`, `type`, `mode`, `status`, `summary`, `subject`, `context`, `customer_ref`, `amount`, `policy_id`, `policy_version`, `rule_id`, `outcome`, `value`, `say`, `reason`, `decided_by`, `decided_by_person_id`, `late_outcome`, `short_code`, `deadline_at`, `next_action_at`, `callback_url`, `idempotency_key`, `request_hash`, `context_scrubbed_at`, `decided_at` |
 | `decision_asks` | `decision_id`, `person_id`, `membership_id`, `channel`, `provider_message_id`, `ai_recommendation`, `sent_at`, `responded_at`, `response`, `response_value` |
 | `rule_drafts` | `person_id`, `scope_type`, `scope_id`, `decision_type`, `text`, `draft` jsonb, `expires_at`, `status` |
 | `suggestions` | `agency_id`, `scope_type`, `scope_id`, `decision_type`, `rule`, `evidence`, `status` |
@@ -502,7 +516,7 @@ Ids are prefixed ULIDs (`agy_ bus_ loc_ per_ mem_ key_ pol_ dec_ ask_ cbd_ sug_ 
 - **API keys:** SHA-256 hashed, prefix-identified, scoped, revocable. Scope checks sit in one dependency, and tests prove `404` across agencies and outside a key's subtree.
 - **People:** shared across agencies, but only the phone number is shared. Names, roles and history stay scoped to the membership's agency.
 - **Inbound:** Twilio signature required. HMAC approval tokens are single-use and expire. SMS commands are authorized by membership role and scope.
-- **Outbound callbacks:** HTTPS only in production, HMAC-signed (`SaySo-Signature: t=,v1=`), SSRF denylist.
+- **Outbound callbacks:** HTTPS only in production, HMAC-signed (`SaySo-Signature: t=,v1=`) with the agency's own derived secret (D17), SSRF denylist. Rotating bumps `callback_secret_version` for that agency only.
 - **LLM:** only the fields listed in §11.2 are sent, it can be disabled per scope, and the provider is named in the privacy notes. AI output is treated as untrusted text: escaped in SMS and never executed.
 - **PII:** `context`, `summary`, phone numbers and AI text never appear in logs. Retention scrubbing is per scope.
 - **Rate limits** per API key.

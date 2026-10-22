@@ -28,6 +28,7 @@ class Principal:
     scope: Scope
     role: str | None = None
     can_approve: bool = True
+    key_id: str | None = None
 
 
 def reaches(p: Principal, target: list[Scope]) -> bool:

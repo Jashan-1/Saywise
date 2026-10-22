@@ -60,17 +60,13 @@ def validate_layer(partial: dict[str, Any]) -> None:
     ClientSettings.model_validate(merge([("layer", partial)])[0])
 
 
-def merge_patch(stored: dict[str, Any], patch: dict[str, Any]) -> dict[str, Any]:
-    """RFC 7396 merge patch, one level deep into sections: null removes an override (inherit)."""
+def apply_patch(stored: dict[str, Any], patch: dict[str, Any]) -> dict[str, Any]:
+    """Set keys on one scope's overrides; sections merge key by key. null is a value, not a
+    delete (contact_hours: null = any time). Dropping an override is a PUT of the whole set."""
     out = dict(stored)
     for key, value in patch.items():
-        if value is None:
-            out.pop(key, None)
-        elif key in SECTIONS and isinstance(value, dict):
-            section = {**out.get(key, {}), **value}
-            out[key] = {k: v for k, v in section.items() if v is not None}
-            if not out[key]:
-                del out[key]
+        if key in SECTIONS and isinstance(value, dict):
+            out[key] = {**out.get(key, {}), **value}
         else:
             out[key] = value
     return out
