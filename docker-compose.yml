@@ -1,0 +1,49 @@
+x-backend: &backend
+  build: ./backend
+  env_file:
+    - path: .env
+      required: false
+  environment:
+    SAYSO_DATABASE_URL: postgresql+asyncpg://sayso:sayso@postgres:5432/sayso
+  depends_on:
+    postgres:
+      condition: service_healthy
+  restart: unless-stopped
+
+services:
+  postgres:
+    image: postgres:16
+    environment:
+      POSTGRES_USER: sayso
+      POSTGRES_PASSWORD: sayso
+      POSTGRES_DB: sayso
+    ports:
+      - "5433:5432" # 5433 so it doesn't clash with a Postgres already on 5432
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    configs:
+      - source: create_test_db
+        target: /docker-entrypoint-initdb.d/create_test_db.sql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U sayso -d sayso"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  api:
+    <<: *backend
+    ports:
+      - "8000:8000"
+
+  worker:
+    <<: *backend
+    command: ["python", "-m", "app.worker"]
+    healthcheck:
+      disable: true
+
+configs:
+  create_test_db:
+    content: "CREATE DATABASE sayso_test;"
+
+volumes:
+  pgdata:
