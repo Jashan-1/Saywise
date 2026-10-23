@@ -172,7 +172,7 @@ def test_shipped_policies_are_valid(path: Path) -> None:
 @pytest.mark.parametrize("path", TEMPLATES, ids=lambda p: p.stem)
 def test_templates_are_safe_defaults(path: Path) -> None:
     raw = json.loads(path.read_text())
-    # System overrides would beat every agency's own settings, and a placeholder can render empty.
+    # D22: templates never decide on their own; system overrides would beat every agency's settings.
+    assert raw["rules"] == [] and raw["default"] == "escalate"
     assert "overrides" not in raw
-    assert all("{" not in r.get("say", "") for r in raw["rules"])
     assert len(TEMPLATES) == 4

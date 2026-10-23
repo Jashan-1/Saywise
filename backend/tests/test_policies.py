@@ -28,7 +28,7 @@ async def test_templates_are_seeded(client: httpx.AsyncClient, make_tree) -> Non
         "trade_in_offer",
     ]
     assert {(p["scope_type"], p["scope_id"], p["source"], p["version"]) for p in templates} == {
-        ("system", "system", "template", 1)
+        ("system", "system", "template", 2)  # 0004 retired v1
     }
 
 

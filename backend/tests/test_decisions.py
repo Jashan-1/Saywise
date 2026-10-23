@@ -132,14 +132,12 @@ async def test_no_policy_escalates_with_reason(client: httpx.AsyncClient, tree: 
     )
 
 
-async def test_template_applies_without_any_setup(client: httpx.AsyncClient, make_tree) -> None:
+async def test_templates_never_decide_on_their_own(client: httpx.AsyncClient, make_tree) -> None:
     t = await make_tree("B")
-    d = (await post(client, t.location_key, decision(20, type="refund"))).json()
-    assert (d["outcome"], d["policy"]["rule_id"], d["say"]) == (
-        "approve",
-        "small_refund",
-        "That refund is approved.",
-    )
+    for decision_type in ("price_adjustment", "booking_exception", "trade_in_offer", "refund"):
+        d = (await post(client, t.location_key, decision(1, type=decision_type))).json()
+        assert (d["status"], d["reason"], d["decided_by"]) == ("pending", "policy_default", None)
+        assert d["policy"]["version"] == 2 and d["policy"]["rule_id"] is None
 
 
 async def test_location_resolution(client: httpx.AsyncClient, tree: Tree, make_tree) -> None:

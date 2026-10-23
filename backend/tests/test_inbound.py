@@ -86,7 +86,9 @@ async def test_first_ask_goes_to_the_lowest_sufficient_authority(
     [(to, text)] = channel.sent
     assert to == LEE
     lines = text.splitlines()
-    assert re.fullmatch(r"SaySo #[2-9A-HJ-NP-Z]{3} · Location A · loaner_car \$40", lines[0])
+    assert re.fullmatch(
+        r"SaySo #[2-9A-HJ-NP-Z]{3} · Location A · loaner_car · amount \$40", lines[0]
+    )
     assert lines[1:3] == ["Needs a loaner <today>", "1=Yes 2=No or reply a number to counter"]
     assert "/v1/approve/" in lines[3]
 
@@ -112,9 +114,9 @@ async def test_sms_answers(client, esc: Esc, channel: FakeChannel) -> None:
     assert channel.to(LEE)[-1] == f"Done: #{code} approved."
 
     counter = await ask(client, key, 40)
-    await sms(client, LEE, "$45")
+    await sms(client, LEE, "$30")
     d = await fetch(client, key, counter["id"])
-    assert (d["outcome"], d["value"], d["say"]) == ("counter", 45.0, "The best we can do is 45.")
+    assert (d["outcome"], d["value"], d["say"]) == ("counter", 30.0, "The best we can do is 30.")
 
     decline = await ask(client, key, 40)
     await sms(client, LEE, "no")
@@ -133,14 +135,24 @@ async def test_authority_is_rechecked_when_answering(
     assert "above your approval limit" in channel.to(LEE)[-1]
     assert channel.sent[-2][0] == RAJ  # asked next, before Lee's reply went out
 
-    # A counter-offer above the replier's limit escalates too.
-    esc.lee.authority_limit = 50
-    await session.commit()
-    d2 = await ask(client, key, 40)
-    await sms(client, LEE, "80")
-    assert (await fetch(client, key, d2["id"]))["status"] == "pending"
-    await sms(client, RAJ, f"#{code_in(channel.to(RAJ)[-1])} 80")
-    assert (await fetch(client, key, d2["id"]))["value"] == 80.0
+
+async def test_counter_must_be_below_the_amount(client, esc: Esc, channel: FakeChannel) -> None:
+    """D21: a counter is in amount's unit (a discount here), > 0 and < what was asked."""
+    key = esc.tree.location_key
+    d = await ask(client, key, 40, type="price_adjustment")  # the template escalates
+    assert " · discount $40" in channel.to(LEE)[-1].splitlines()[0]  # the SMS shows the unit
+    for bad in ("820", "40", "0"):
+        await sms(client, LEE, bad)
+        assert channel.to(LEE)[-1] == "Counter must be a discount under $40."
+        assert (await fetch(client, key, d["id"]))["status"] == "pending"
+    assert len(channel.sent) == 4 and channel.to(RAJ) == []  # not escalated, ask still open
+    await sms(client, LEE, "15")
+    assert (await fetch(client, key, d["id"]))["value"] == 15.0
+
+    other = await ask(client, key, 40)  # no policy, so the unit is just "amount"
+    await sms(client, LEE, "99")
+    assert channel.to(LEE)[-1] == "Counter must be an amount under $40."
+    assert (await fetch(client, key, other["id"]))["status"] == "pending"
 
 
 async def test_others_hear_it_was_handled(client, esc: Esc, channel: FakeChannel, session) -> None:
@@ -274,8 +286,10 @@ async def test_approval_link(client, esc: Esc, channel: FakeChannel, session, ca
     bad = await client.post(link, data={"action": "counter", "value": "abc"})
     assert bad.status_code == 422
     r = await client.post(link, data={"action": "counter", "value": "$45"})
+    assert "Counter must be an amount under $40." in r.text  # same rule as SMS
+    r = await client.post(link, data={"action": "counter", "value": "$30"})
     assert r.status_code == 200 and "countered" in r.text
-    assert (await fetch(client, esc.tree.location_key, d["id"]))["value"] == 45.0
+    assert (await fetch(client, esc.tree.location_key, d["id"]))["value"] == 30.0
     again = await client.get(link)
     assert "Handled by Lee" in again.text
     assert (

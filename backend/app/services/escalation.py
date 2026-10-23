@@ -49,12 +49,34 @@ def in_contact_hours(schedule: Mapping[Any, list[str]] | None, local: datetime) 
     return False
 
 
+def unit_of(policy_body: Mapping[str, Any] | None) -> str:
+    """What `amount` measures, from the policy's amount_label: "discount ($)" -> "discount"."""
+    label = (policy_body or {}).get("amount_label") or "amount"
+    return str(label).replace("($)", "").strip()
+
+
+def counter_problem(value: Decimal, amount: Decimal | None, unit: str) -> str | None:
+    """D21: a counter is in amount's unit, more than 0 and less than what was asked."""
+    if amount is None:
+        return None if value > 0 else "Counter must be more than 0."
+    if 0 < value < amount:
+        return None
+    article = "an" if unit[:1].lower() in "aeiou" else "a"
+    return f"Counter must be {article} {unit} under ${format_value(amount)}."
+
+
 def ask_text(
-    code: str, location: str, label: str, amount: Decimal | None, summary: str | None, link: str
+    code: str,
+    location: str,
+    label: str,
+    unit: str,
+    amount: Decimal | None,
+    summary: str | None,
+    link: str,
 ) -> str:
     head = f"SaySo #{code} · {location} · {label}"
     if amount is not None:
-        head += f" ${format_value(amount)}"
+        head += f" · {unit} ${format_value(amount)}"
     lines = [head, (summary or "")[:160], "1=Yes 2=No or reply a number to counter", link]
     return "\n".join(line for line in lines if line)
 
@@ -172,7 +194,13 @@ async def advance(
         await session.flush()
         link = approval_link(ask, decision.deadline_at)
         text = ask_text(
-            decision.short_code or "", location.name, label, decision.amount, decision.summary, link
+            decision.short_code or "",
+            location.name,
+            label,
+            unit_of(resolved.policy.body if resolved.policy else None),
+            decision.amount,
+            decision.summary,
+            link,
         )
         try:
             ask.provider_message_id = await channel.send(person.phone, text)
@@ -215,6 +243,11 @@ async def answer(session: AsyncSession, channel: Channel, ask: DecisionAsk, cmd:
         return await closed_reply(session, decision)
     membership = await session.get_one(Membership, ask.membership_id)
     code = decision.short_code
+    resolved = await resolve_settings(session, decision.location_id, decision.type)
+    if cmd.kind == "counter" and cmd.value is not None:
+        policy_body = resolved.policy.body if resolved and resolved.policy else None
+        if problem := counter_problem(cmd.value, decision.amount, unit_of(policy_body)):
+            return problem  # the ask stays open, so they can reply again
     ask.responded_at, ask.response, ask.response_value = utcnow(), cmd.kind, cmd.value
 
     # Authority is re-checked now, not when the ask went out (§9.4).
@@ -227,7 +260,6 @@ async def answer(session: AsyncSession, channel: Channel, ask: DecisionAsk, cmd:
         await advance(session, channel, decision)
         return f"#{code} is above your approval limit, so I've asked someone else."
 
-    resolved = await resolve_settings(session, decision.location_id, decision.type)
     template = getattr(resolved.settings.on_answer, cmd.kind) if resolved else ""
     say = render(template, {"value": cmd.value}) or ""
     if (

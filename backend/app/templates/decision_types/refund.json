@@ -2,13 +2,6 @@
   "decision_type": "refund",
   "label": "Refund",
   "amount_label": "refund ($)",
-  "rules": [
-    {
-      "id": "small_refund",
-      "when": { "all": [{ "var": "amount", "op": "<=", "value": 25 }] },
-      "then": "approve",
-      "say": "That refund is approved."
-    }
-  ],
+  "rules": [],
   "default": "escalate"
 }

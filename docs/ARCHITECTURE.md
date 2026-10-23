@@ -30,6 +30,8 @@ Status: v0.2 design (after design review) · Owner: Jashan Singh · License: MIT
 | D18 | Contact hours | `contact_hours` (scope setting and membership column) is when people **may** be texted. Default every day `07:00-21:00` in the decision's location timezone; a window may cross midnight and belongs to the day it starts; `null` = any time. Replaces `quiet_hours` / `on_hours` |
 | D19 | API key management | `POST/GET /v1/api_keys` and `POST /v1/api_keys/{id}/revoke`, agency keys only. A key can't revoke itself |
 | D20 | Decision `say` and `reason` | Stored on `decisions`. `reason` is one of `rule_matched`, `policy_default`, `no_policy`, `human`, `timeout`, `after_hours`, `no_eligible_approver`, `cancelled`. Retention scrubs `say` together with `context` |
+| D21 | Counter-offers | A counter is **always in `amount`'s unit** (for `price_adjustment`, the discount), more than 0 and less than the amount requested. Anything else gets "Counter must be a discount under $50" and the ask stays open; it is not escalated. The SMS shows the unit |
+| D22 | Starter templates | **No approve rules** (no rules at all): everything escalates to a human until an agency or owner adds an approve rule on purpose |
 
 ## 1. Problem
 
@@ -262,7 +264,7 @@ Every transition is one `UPDATE ... WHERE status='pending' RETURNING`, so the fi
 
 ### 8.1 Templates
 
-Starter templates ship as JSON under `app/templates/decision_types/` and are seeded at **system scope**, for example `price_adjustment`, `booking_exception`, `trade_in_offer`, `refund`.
+Starter templates ship as JSON under `app/templates/decision_types/` and are seeded at **system scope**, for example `price_adjustment`, `booking_exception`, `trade_in_offer`, `refund`. They carry a label and `amount_label` but **no rules**, so a template never decides on its own (D22). A worked example with rules lives in `examples/policies/`.
 
 - `POST /v1/policies/{type}/clone?to_scope=` copies a template or a parent's policy down to a scope for editing.
 - Agencies can also create brand-new types.
@@ -336,7 +338,8 @@ wait = min(max(t80 of chosen), window) ; next_action_at = now + wait
 
 - First valid answer wins. Everyone else asked gets "Handled by Raj ✓".
 - Two-person rule above `two_person_over`: two distinct approvals are needed, and one decline ends it.
-- Authority is re-checked at answer time. A counter-offer above the replier's limit escalates again.
+- Authority is re-checked at answer time. An approval above the replier's current limit escalates again.
+- A counter-offer is in `amount`'s unit and must be more than 0 and less than the amount requested (D21). An invalid one is answered with "Counter must be a discount under $50" and the ask stays open.
 - No one is asked twice for the same decision.
 
 ## 10. SMS channel (D6)
@@ -344,7 +347,7 @@ wait = min(max(t80 of chosen), window) ; next_action_at = now + wait
 ### 10.1 Approver ask
 
 ```
-SaySo #K7Z · Fremont Ford · Price adj −$50 (850→800)
+SaySo #K7Z · Fremont Ford · Price adjustment · discount $50
 Repeat customer: 3 jobs, 3 approved. AI suggests: APPROVE (within usual range)
 1=Yes 2=No or reply a number to counter
 https://api.sayso.example/v1/approve/Xy8...

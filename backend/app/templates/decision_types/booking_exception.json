@@ -1,13 +1,6 @@
 {
   "decision_type": "booking_exception",
   "label": "Booking exception",
-  "rules": [
-    {
-      "id": "enough_notice",
-      "when": { "all": [{ "var": "context.notice_hours", "op": ">=", "value": 48 }] },
-      "then": "approve",
-      "say": "We can make that work."
-    }
-  ],
+  "rules": [],
   "default": "escalate"
 }

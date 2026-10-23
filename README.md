@@ -49,7 +49,7 @@ docker compose exec api python -m scripts.create_agency "Demo Agency"
 # → prints an agency API key: sk_live_...
 ```
 
-Create a business and location, add an approver, and clone a starter policy:
+Create a business and location, add an approver, and give the business a policy. Starter templates have no approve rules, so without one every request goes to a human:
 
 ```bash
 H=(-H "Authorization: Bearer $SAYSO_KEY" -H "Content-Type: application/json")
@@ -66,7 +66,8 @@ curl -X POST localhost:8000/v1/memberships "${H[@]}" \
   -d '{"person_id":"per_...","scope_type":"business","scope_id":"bus_...",
        "display_name":"Raj","role":"owner","authority_limit":200}'
 
-curl -X POST "localhost:8000/v1/policies/price_adjustment/clone?to_scope=business:bus_..." "${H[@]}"
+curl -X PUT "localhost:8000/v1/policies/price_adjustment?scope=business:bus_..." "${H[@]}" \
+  --data @examples/policies/price_adjustment.json
 ```
 
 Ask for a decision:
@@ -91,7 +92,7 @@ curl -X POST localhost:8000/v1/decisions \
   "status": "decided",
   "outcome": "approve",
   "decided_by": "policy",
-  "say": "Good news, we can do that."
+  "say": "Good news, we can do 800."
 }
 ```
 

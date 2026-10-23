@@ -2,19 +2,6 @@
   "decision_type": "trade_in_offer",
   "label": "Trade-in offer",
   "amount_label": "above book value ($)",
-  "rules": [
-    {
-      "id": "at_or_below_book",
-      "when": { "all": [{ "var": "amount", "op": "<=", "value": 0 }] },
-      "then": "approve",
-      "say": "We can do that for your trade-in."
-    },
-    {
-      "id": "far_above_book",
-      "when": { "all": [{ "var": "amount", "op": ">", "value": 2000 }] },
-      "then": "decline",
-      "say": "That's above what we can offer for this trade-in."
-    }
-  ],
+  "rules": [],
   "default": "escalate"
 }
