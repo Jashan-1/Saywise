@@ -42,6 +42,11 @@ def setup_logging(level: str) -> None:
     logging.getLogger("uvicorn.access").disabled = True  # request_context logs requests
 
 
+def redact(path: str) -> str:
+    """Approval links carry a bearer token in the path; never log it."""
+    return "/v1/approve/{token}" if path.startswith("/v1/approve/") else path
+
+
 async def request_context(
     request: Request, call_next: Callable[[Request], Awaitable[Response]]
 ) -> Response:
@@ -55,7 +60,7 @@ async def request_context(
             "request",
             extra={
                 "method": request.method,
-                "path": request.url.path,
+                "path": redact(request.url.path),
                 "status": response.status_code,
                 "latency_ms": round((time.perf_counter() - start) * 1000, 1),
             },

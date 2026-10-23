@@ -14,11 +14,14 @@ from app.api.v1.router import router as v1_router
 from app.core.config import get_settings
 from app.core.db import engine
 from app.core.logging import log, request_context, setup_logging
+from app.services.waiter import waiter
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
+    await waiter.start(get_settings().database_url)
     yield
+    await waiter.stop()
     await engine.dispose()
 
 

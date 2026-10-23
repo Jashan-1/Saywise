@@ -12,6 +12,7 @@ dependencies = [
     "pydantic-settings>=2.16.1",
     "python-ulid>=4.0.1",
     "sqlalchemy[asyncio]>=2.1.6",
+    "twilio>=9.12.0",
     "uvicorn[standard]>=0.54.0",
 ]
 
@@ -28,6 +29,10 @@ select = ["E", "F", "I", "B", "UP", "S", "ASYNC"]
 [tool.mypy]
 strict = true
 plugins = ["pydantic.mypy"]
+
+[[tool.mypy.overrides]]
+module = ["asyncpg.*", "twilio.*"]
+ignore_missing_imports = true
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"

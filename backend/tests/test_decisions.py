@@ -116,7 +116,8 @@ async def test_policy_decisions(
     assert d["decided_by"] == ("policy" if status == "decided" else None)
     assert d["policy"]["version"] == 1 and d["policy"]["rule_id"] == rule_id
     assert d["location_id"] == tree.location.id and d["id"].startswith("dec_")
-    assert (d["approver"], d["ai_recommendation"], d["poll_after_ms"]) == (None, None, None)
+    assert (d["approver"], d["ai_recommendation"]) == (None, None)
+    assert d["poll_after_ms"] == (1000 if status == "pending" else None)
 
 
 async def test_no_policy_escalates_with_reason(client: httpx.AsyncClient, tree: Tree) -> None:

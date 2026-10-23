@@ -102,6 +102,14 @@ class OnTimeout(_In):
     hold_say: str = Field("Let me check on that for you. One moment.", max_length=300)
 
 
+class OnAnswer(_In):
+    """What the agent says once a person answers. `{value}` is the counter-offer."""
+
+    approve: str = Field("Good news, that's approved.", max_length=300)
+    decline: str = Field("I'm sorry, we can't do that one.", max_length=300)
+    counter: str = Field("The best we can do is {value}.", max_length=300)
+
+
 class Ai(_In):
     summaries: bool = True
     recommendations: bool = True
@@ -121,6 +129,7 @@ class ClientSettings(_In):
     )
     after_hours: Literal["defer", "on_call"] = "defer"
     on_timeout: OnTimeout = Field(default_factory=OnTimeout)
+    on_answer: OnAnswer = Field(default_factory=OnAnswer)
     ai: Ai = Field(default_factory=Ai)
     retention: Retention = Field(default_factory=Retention)
     locale: Literal["en"] = "en"

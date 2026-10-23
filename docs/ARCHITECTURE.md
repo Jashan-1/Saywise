@@ -211,6 +211,7 @@ code defaults → agency.settings → business.settings → location.settings
 | `after_hours` | `"defer"` | `"defer"` \| `"on_call"` |
 | `on_timeout.outcome` | `"defer"` | **`"defer"` \| `"decline"` only** (fixed floor) |
 | `on_timeout.say` / `hold_say` | English templates | ≤ 300 chars |
+| `on_answer.approve` / `decline` / `counter` | English templates | ≤ 300 chars. What the agent says after a person answers; `{value}` is the counter-offer |
 | `ai.summaries` / `ai.recommendations` / `ai.rule_drafting` | true / true / true | Any scope may disable |
 | `retention.context_days` | 90 | 1 – 3650 |
 | `locale` | `"en"` | `"en"` only in v1 (D13) |
@@ -343,7 +344,7 @@ wait = min(max(t80 of chosen), window) ; next_action_at = now + wait
 ### 10.1 Approver ask
 
 ```
-SaySo #K7 · Fremont Ford · Price adj −$50 (850→800)
+SaySo #K7Z · Fremont Ford · Price adj −$50 (850→800)
 Repeat customer: 3 jobs, 3 approved. AI suggests: APPROVE (within usual range)
 1=Yes 2=No or reply a number to counter
 https://api.sayso.example/v1/approve/Xy8...
@@ -358,13 +359,13 @@ The AI line is omitted if AI is disabled, slow or failing (§11).
 | `1`, `y`, `yes`, `ok` | Approve |
 | `2`, `n`, `no` | Decline |
 | A number | Counter with that value |
-| `#K7 1` | Answer a specific decision |
+| `#K7Z 1` | Answer a specific decision |
 | `RULES` | Owners/admins: list active rules for their scope |
 | Any other text from an owner/admin | Treated as a rule-change request (§11.3) |
 | `STOP` / `START` | Opt out / in (carrier-mandated; respected before anything else) |
 
 - **Shared number, many tenants:** a reply is matched against **all** open asks for that phone number across agencies.
-- If more than one ask is open, a bare `1` gets "Which one? Reply #K7 1 or #M2 1".
+- If more than one ask is open, a bare `1` gets "Which one? Reply #K7Z 1 or #M2Q 1".
 - Short codes are **3 characters** from an alphabet without `0 O 1 I`. They are unique among **all** open decisions while the number is shared: a partial unique index covers pending decisions, and generation also checks expired decisions still inside the late-answer window and retries on a clash (a partial index can't use `now()`).
 - Replies to decided, cancelled or closed decisions follow §7.3.
 

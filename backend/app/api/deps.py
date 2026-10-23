@@ -5,6 +5,9 @@ from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.channels.base import Channel
+from app.channels.twilio_sms import TwilioSms
+from app.core.config import get_settings
 from app.core.db import get_session
 from app.core.security import key_prefix, verify_key
 from app.models import ApiKey, utcnow
@@ -34,6 +37,13 @@ async def get_principal(
 
 
 PrincipalDep = Annotated[Principal, Depends(get_principal)]
+
+
+def get_channel() -> Channel:
+    return TwilioSms(get_settings())
+
+
+ChannelDep = Annotated[Channel, Depends(get_channel)]
 
 
 async def authorize(

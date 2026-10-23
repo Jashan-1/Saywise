@@ -60,7 +60,7 @@ def matches(cond: dict[str, Any], facts: dict[str, Any]) -> bool:
         return False
 
 
-def _text(value: Any) -> str:
+def format_value(value: Any) -> str:
     if value is MISSING or value is None:
         return ""
     if isinstance(value, float | Decimal):
@@ -76,7 +76,7 @@ def render(template: str | None, facts: dict[str, Any]) -> str | None:
     """`{path}` substitution only. A missing path renders as an empty string."""
     if template is None:
         return None
-    return PLACEHOLDER.sub(lambda m: _text(lookup(facts, m.group(1))), template)
+    return PLACEHOLDER.sub(lambda m: format_value(lookup(facts, m.group(1))), template)
 
 
 def evaluate(policy: dict[str, Any], facts: dict[str, Any]) -> Verdict:

@@ -4,16 +4,18 @@ per (agency, Idempotency-Key)."""
 import hashlib
 import json
 from datetime import timedelta
+from decimal import Decimal
 from typing import Any
 
-from sqlalchemy import select
+from sqlalchemy import func, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.constants import WAIT_CHANNEL
 from app.models import Decision, utcnow
 from app.schemas import DecisionIn
 from app.services.policy_engine import Verdict, evaluate
-from app.services.settings import resolve
+from app.services.settings import resolve as resolve_settings
 
 
 class IdempotencyConflict(Exception):
@@ -60,7 +62,7 @@ async def create(
         request["deadlines"] = {f"{body.mode}_ms": body.deadline_ms}
     if body.max_fanout is not None:
         request["escalation"] = {"max_fanout": body.max_fanout}
-    resolved = await resolve(session, location_id, body.type, request)
+    resolved = await resolve_settings(session, location_id, body.type, request)
     if resolved is None:
         raise LookupError(location_id)
     settings, policy = resolved.settings, resolved.policy
@@ -115,4 +117,36 @@ async def create(
         if existing is None:
             raise
         return existing
+    return decision
+
+
+async def resolve(
+    session: AsyncSession,
+    decision_id: str,
+    outcome: str,
+    value: Decimal | None,
+    person_id: str,
+    say: str,
+) -> Decision | None:
+    """A person's answer. First valid answer wins: one conditional UPDATE, with NOTIFY in the
+    same transaction so waiters wake only once it is committed. None if it was already settled."""
+    decision = await session.scalar(
+        update(Decision)
+        .where(Decision.id == decision_id, Decision.status == "pending")
+        .values(
+            status="decided",
+            outcome=outcome,
+            value=value,
+            say=say,
+            reason="human",
+            decided_by="human",
+            decided_by_person_id=person_id,
+            decided_at=utcnow(),
+            next_action_at=None,
+        )
+        .returning(Decision)
+    )
+    if decision is not None:
+        await session.execute(select(func.pg_notify(WAIT_CHANNEL, decision_id)))
+    await session.commit()
     return decision
