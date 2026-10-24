@@ -381,3 +381,26 @@ class DecisionOut(BaseModel):
     deadline_at: datetime
     poll_after_ms: int | None = None
     created_at: datetime
+
+
+# --- suggestions and usage (§12) ----------------------------------------------------------------
+
+
+class SuggestionOut(_Out):
+    id: str
+    scope_type: str
+    scope_id: str
+    decision_type: str
+    rule: dict[str, Any]
+    evidence: dict[str, Any]
+    status: str
+    created_at: datetime
+
+
+class UsageMonth(BaseModel):
+    month: str  # "2026-10"
+    decisions: int
+    asks: int
+    ai_calls: int
+    ai_tokens_in: int
+    ai_tokens_out: int

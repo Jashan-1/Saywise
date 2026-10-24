@@ -15,7 +15,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.constants import WAIT_CHANNEL
 from app.models import Decision, utcnow
 from app.schemas import DecisionIn, OnTimeout
-from app.services import callbacks
+from app.services import callbacks, history
 from app.services.policy_engine import Verdict, evaluate
 from app.services.settings import resolve as resolve_settings
 
@@ -69,7 +69,10 @@ async def create(
         raise LookupError(location_id)
     settings, policy = resolved.settings, resolved.policy
 
-    facts: dict[str, Any] = {"type": body.type, "context": body.context, "history": {}}
+    customer = await history.customer_facts(
+        session, agency_id, location_id, body.subject.customer_ref
+    )
+    facts: dict[str, Any] = {"type": body.type, "context": body.context, "history": customer}
     if body.subject.amount is not None:
         facts["amount"] = body.subject.amount
     verdict = evaluate(policy.body, facts) if policy else Verdict("escalate", "no_policy")

@@ -3,6 +3,7 @@ customer facts."""
 
 from dataclasses import dataclass
 from datetime import datetime, timedelta
+from typing import Any
 
 from sqlalchemy import extract, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -14,7 +15,7 @@ from app.core.constants import (
     STATS_LOOKBACK,
     STATS_MIN_ASKS,
 )
-from app.models import DecisionAsk
+from app.models import Decision, DecisionAsk, Location
 
 
 @dataclass(frozen=True)
@@ -67,3 +68,42 @@ async def approver_stats(
             _cache[(pid, hour, window_s)] = (now + STATS_CACHE_TTL, stats)
             out[pid] = stats
     return out
+
+
+async def customer_facts(
+    session: AsyncSession, agency_id: str, location_id: str, customer_ref: str | None
+) -> dict[str, Any]:
+    """§12: this customer's past decisions within the same business only (never across
+    businesses). Exposed to rules as history.*."""
+    if customer_ref is None:
+        return {}
+    business = select(Location.business_id).where(Location.id == location_id).scalar_subquery()
+    same = (
+        Decision.agency_id == agency_id,
+        Decision.customer_ref == customer_ref,
+        Decision.location_id.in_(select(Location.id).where(Location.business_id == business)),
+    )
+    approved, declined = Decision.outcome == "approve", Decision.outcome == "decline"
+    count, approved_n, declined_n, total = (
+        await session.execute(
+            select(
+                func.count(),
+                func.count().filter(approved),
+                func.count().filter(declined),
+                func.coalesce(func.sum(Decision.amount).filter(approved), 0),
+            ).where(*same)
+        )
+    ).one()
+    last = await session.scalar(
+        select(Decision.outcome)
+        .where(*same, Decision.outcome.is_not(None))
+        .order_by(Decision.created_at.desc())
+        .limit(1)
+    )
+    return {
+        "decision_count": count,
+        "approved_count": approved_n,
+        "declined_count": declined_n,
+        "last_outcome": last,
+        "total_approved_amount": total,
+    }

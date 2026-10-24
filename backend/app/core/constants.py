@@ -23,3 +23,10 @@ COLD_T80 = timedelta(seconds=20)
 STATS_MIN_ASKS = 5
 STATS_LOOKBACK = timedelta(days=90)
 STATS_CACHE_TTL = timedelta(minutes=5)
+
+# Suggestions and retention (§12)
+SUGGEST_LOOKBACK = timedelta(days=60)
+SUGGEST_MIN_DECISIONS = 10
+SUGGEST_MIN_APPROVE_RATE = 0.9
+AMOUNT_BUCKETS = (0, 25, 50, 100, 250, 500, 1000, 2500, 5000, 10000)  # (lo, hi] edges
+NIGHTLY = timedelta(hours=24)  # shortcut: "nightly" = 24 h after the last run, not a clock time

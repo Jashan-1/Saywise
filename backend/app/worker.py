@@ -5,18 +5,28 @@ FOR UPDATE SKIP LOCKED so no two handle the same one."""
 import asyncio
 import contextlib
 import signal
+from collections.abc import Awaitable, Callable
+from datetime import timedelta
 
 import httpx
-from sqlalchemy import select, update
+from sqlalchemy import or_, select, update
+from sqlalchemy.dialects.postgresql import insert
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.channels.base import Channel
 from app.channels.twilio_sms import TwilioSms
 from app.core.config import get_settings
-from app.core.constants import CALLBACK_TIMEOUT_S, FIXED_WAIT, WORKER_BATCH, WORKER_TICK_S
+from app.core.constants import (
+    CALLBACK_TIMEOUT_S,
+    FIXED_WAIT,
+    NIGHTLY,
+    WORKER_BATCH,
+    WORKER_TICK_S,
+)
 from app.core.db import SessionLocal
 from app.core.logging import log, setup_logging
-from app.models import CallbackDelivery, Decision, utcnow
-from app.services import callbacks, decisions, escalation
+from app.models import CallbackDelivery, Decision, WorkerJob, utcnow
+from app.services import callbacks, decisions, escalation, retention, suggestions
 
 
 async def step_decisions(channel: Channel) -> int:
@@ -73,7 +83,34 @@ async def deliver_callbacks(client: httpx.AsyncClient) -> int:
     return done
 
 
+async def run_job(
+    name: str, every: timedelta, job: Callable[[AsyncSession], Awaitable[int]]
+) -> bool:
+    """Run `job` if it hasn't run in `every`. The worker_jobs row is locked with SKIP LOCKED,
+    so with many workers exactly one runs it. The job's writes commit with last_run_at."""
+    async with SessionLocal() as session:
+        await session.execute(insert(WorkerJob).values(name=name).on_conflict_do_nothing())
+        await session.commit()
+        row = await session.scalar(
+            select(WorkerJob)
+            .where(
+                WorkerJob.name == name,
+                or_(WorkerJob.last_run_at.is_(None), WorkerJob.last_run_at < utcnow() - every),
+            )
+            .with_for_update(skip_locked=True)
+        )
+        if row is None:
+            return False
+        count = await job(session)
+        row.last_run_at = utcnow()
+        await session.commit()
+        log.info(f"job {name} done: {count}")
+        return True
+
+
 async def tick(channel: Channel, client: httpx.AsyncClient) -> int:
+    await run_job("suggestions", NIGHTLY, suggestions.run)
+    await run_job("retention", NIGHTLY, retention.run)
     return await step_decisions(channel) + await deliver_callbacks(client)
 
 

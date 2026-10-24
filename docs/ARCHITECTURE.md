@@ -422,8 +422,8 @@ Owner:  "YES" ─► new policy version at the owner's scope; audit records who/
 ## 12. Memory, suggestions, usage and retention (D9, D10, D14)
 
 - **Customer facts:** `history.decision_count`, `approved_count`, `declined_count`, `last_outcome` and `total_approved_amount` for the same `customer_ref`, **within the same business**. History is never shared across businesses. Caller-supplied facts go in `context` and are trusted as sent.
-- **Rule suggestions:** a nightly job groups human decisions by `(type, amount bucket)` over 60 days. When `n ≥ 10` and the approve rate is `≥ 0.9`, it creates a suggestion. Adopting it via API, or by an owner replying YES to a suggestion SMS, writes a new policy version. **Nothing is applied automatically.**
-- **Usage:** decisions, asks and AI calls are already rows. `GET /v1/usage?scope=&from=&to=` aggregates counts per scope and month. No separate metering table until pricing is decided.
+- **Rule suggestions:** a nightly job groups human decisions by `(type, amount bucket)` over 60 days. When `n ≥ 10` and the approve rate is `≥ 0.9`, it creates a suggestion. Adopting it via API, or by an owner replying YES to a suggestion SMS, writes a new policy version. **Nothing is applied automatically.** Suggestions are made per business, with amount buckets `(0,25] (25,50] (50,100] (100,250] … (5000,10000]`; adopting appends the approve rule to the policy that applies at that business, so existing rules keep priority.
+- **Usage:** decisions, asks and AI calls are already rows. `GET /v1/usage?scope=&from=&to=` aggregates counts per scope and month. No separate metering table until pricing is decided. AI calls with no location (e.g. rule drafting at business scope) count at agency scope only.
 - **Retention:** a daily job nulls `context`, `summary`, `say` and AI text on decisions older than the resolved `retention.context_days`. Outcomes, amounts, timings and `customer_ref` are kept so history and suggestions keep working.
 
 ## 13. API (all under `/v1`, D15)
