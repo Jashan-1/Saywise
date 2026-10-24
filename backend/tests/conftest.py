@@ -156,3 +156,17 @@ def add_member(session: AsyncSession) -> Callable[..., Awaitable[Membership]]:
         return membership
 
     return add
+
+
+@pytest.fixture
+def staff(session: AsyncSession, add_member) -> Callable[[Tree], Awaitable[Membership]]:
+    """An approver at the tree's agency who can be texted any time and approve anything, so
+    escalated decisions stay pending instead of expiring for want of anyone to ask."""
+
+    async def add(tree: Tree) -> Membership:
+        tree.agency.settings = {**tree.agency.settings, "contact_hours": None}
+        await session.commit()
+        phone = f"+1999{abs(hash(tree.agency.id)) % 10**7:07d}"
+        return await add_member(tree.agency.id, ("agency", tree.agency.id), phone, "Desk", 10**9)
+
+    return add

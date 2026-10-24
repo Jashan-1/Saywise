@@ -235,6 +235,7 @@ class Decision(Timestamps, Base):
     decided_by: Mapped[str | None]
     decided_by_person_id: Mapped[str | None] = mapped_column(ForeignKey("people.id"))
     late_outcome: Mapped[str | None]
+    late_value: Mapped[Decimal | None]  # a late counter-offer
     short_code: Mapped[str | None]
     deadline_at: Mapped[datetime]
     next_action_at: Mapped[datetime | None]
@@ -291,6 +292,13 @@ class Suggestion(Timestamps, Base):
 
 class CallbackDelivery(Timestamps, Base):
     __tablename__ = "callback_deliveries"
+    __table_args__ = (
+        Index(
+            "ix_callback_deliveries_due",
+            "next_attempt_at",
+            postgresql_where=text("delivered_at IS NULL"),
+        ),
+    )
     id: Mapped[str] = pk("cbd")
     decision_id: Mapped[str] = mapped_column(ForeignKey("decisions.id"), index=True)
     event: Mapped[str]

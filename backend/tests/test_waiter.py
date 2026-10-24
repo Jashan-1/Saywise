@@ -52,8 +52,11 @@ async def test_waiter_wakes_on_notify_and_times_out() -> None:
         await w.stop()
 
 
-async def test_live_request_times_out_to_pending(client: httpx.AsyncClient, make_tree) -> None:
+async def test_live_request_times_out_to_pending(
+    client: httpx.AsyncClient, make_tree, staff
+) -> None:
     t = await make_tree("A")
+    await staff(t)
     start = time.monotonic()
     r = await client.post(
         "/v1/decisions",

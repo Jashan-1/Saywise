@@ -55,8 +55,9 @@ def decision(amount: float | None = 40, **kw: Any) -> dict[str, Any]:
 
 
 @pytest.fixture
-async def tree(client: httpx.AsyncClient, make_tree) -> Tree:
+async def tree(client: httpx.AsyncClient, make_tree, staff) -> Tree:
     t: Tree = await make_tree("A")
+    await staff(t)
     r = await client.put(
         "/v1/policies/price_adjustment",
         params={"scope": f"business:{t.business.id}"},
@@ -132,8 +133,11 @@ async def test_no_policy_escalates_with_reason(client: httpx.AsyncClient, tree: 
     )
 
 
-async def test_templates_never_decide_on_their_own(client: httpx.AsyncClient, make_tree) -> None:
+async def test_templates_never_decide_on_their_own(
+    client: httpx.AsyncClient, make_tree, staff
+) -> None:
     t = await make_tree("B")
+    await staff(t)
     for decision_type in ("price_adjustment", "booking_exception", "trade_in_offer", "refund"):
         d = (await post(client, t.location_key, decision(1, type=decision_type))).json()
         assert (d["status"], d["reason"], d["decided_by"]) == ("pending", "policy_default", None)
@@ -275,3 +279,32 @@ async def test_database_enforces_the_floor(
     with pytest.raises(IntegrityError):
         await session.flush()
     await session.rollback()
+
+
+async def test_cancel(client: httpx.AsyncClient, tree: Tree, make_tree) -> None:
+    other = await make_tree("B")
+    d = (await post(client, tree.location_key, decision(80))).json()
+    assert d["status"] == "pending"
+    url = f"/v1/decisions/{d['id']}/cancel"
+    assert (await client.post(url, headers=auth(other.agency_key))).status_code == 404
+    r = await client.post(url, headers=auth(tree.location_key))
+    assert r.status_code == 200
+    assert (r.json()["status"], r.json()["reason"], r.json()["outcome"]) == (
+        "cancelled",
+        "cancelled",
+        None,
+    )
+    again = await client.post(url, headers=auth(tree.location_key))
+    assert again.status_code == 409 and again.headers["content-type"] == "application/problem+json"
+    decided = (await post(client, tree.location_key, decision(40))).json()
+    r = await client.post(f"/v1/decisions/{decided['id']}/cancel", headers=auth(tree.location_key))
+    assert r.status_code == 409
+
+
+async def test_async_mode_returns_202_without_waiting(
+    client: httpx.AsyncClient, tree: Tree
+) -> None:
+    r = await post(client, tree.location_key, decision(80, mode="async", wait_ms=5000))
+    assert r.status_code == 202 and r.json()["status"] == "pending"
+    r = await post(client, tree.location_key, decision(40, mode="async"))
+    assert r.status_code == 202 and r.json()["outcome"] == "approve"  # rules still answer at once

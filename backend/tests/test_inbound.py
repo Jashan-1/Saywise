@@ -223,8 +223,13 @@ async def test_stop_and_start(client, esc: Esc, channel: FakeChannel, session) -
 async def test_nobody_eligible(client, esc: Esc, channel: FakeChannel, session) -> None:
     d = await ask(client, esc.tree.location_key, 1000)  # above everyone's limit
     assert channel.sent == []
-    row = await session.get(Decision, d["id"])
-    assert row.short_code and row.next_action_at == row.deadline_at  # waits for expiry (phase 4)
+    # Nobody could ever answer, so the caller gets the safe default now, not at the deadline.
+    assert (d["status"], d["outcome"], d["decided_by"], d["reason"]) == (
+        "expired",
+        "defer",
+        "timeout",
+        "no_eligible_approver",
+    )
 
 
 async def test_contact_hours_limit_who_is_asked(

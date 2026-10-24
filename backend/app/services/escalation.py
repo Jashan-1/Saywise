@@ -125,8 +125,10 @@ async def eligible(
     scope_hours: Mapping[Any, list[str]] | None,
     timezone: str,
     now: datetime,
+    use_hours: bool = True,
 ) -> list[tuple[Membership, Person]]:
-    """§9.1 without stats, lowest sufficient authority first, one membership per person."""
+    """§9.1 without stats, lowest sufficient authority first, one membership per person.
+    `use_hours=False` is for the after-hours on-call fallback."""
     chain = await scopes.chain(session, "location", decision.location_id) or []
     asked = select(DecisionAsk.person_id).where(DecisionAsk.decision_id == decision.id)
     q = (
@@ -165,7 +167,8 @@ async def eligible(
             membership.max_asks_per_hour is not None
             and load.get(membership.id, 0) >= membership.max_asks_per_hour
         )
-        if capped or not in_contact_hours(hours, local) or any(p is person for _, p in chosen):
+        outside = use_hours and not in_contact_hours(hours, local)
+        if capped or outside or any(p is person for _, p in chosen):
             continue
         chosen.append((membership, person))
     return chosen
@@ -174,7 +177,8 @@ async def eligible(
 async def advance(
     session: AsyncSession, channel: Channel, decision: Decision
 ) -> DecisionAsk | None:
-    """Ask the next eligible approver. With nobody left, wait for the deadline."""
+    """Ask the next eligible approver. With nobody left, wait for the deadline. If nobody can be
+    asked at all, after_hours decides (§9.1): defer expires now, on_call asks on-call members."""
     if decision.short_code is None:
         await _assign_short_code(session, decision)
     resolved = await resolve_settings(session, decision.location_id, decision.type)
@@ -183,9 +187,22 @@ async def advance(
     location = await session.get_one(Location, decision.location_id)
     label = resolved.policy.body.get("label", decision.type) if resolved.policy else decision.type
     now = utcnow()
-    candidates = await eligible(
-        session, decision, resolved.settings.contact_hours, location.timezone, now
+    hours = resolved.settings.contact_hours
+    candidates = await eligible(session, decision, hours, location.timezone, now)
+    already_asked = await session.scalar(
+        select(DecisionAsk.id).where(
+            DecisionAsk.decision_id == decision.id, DecisionAsk.sent_at.is_not(None)
+        )
     )
+    if not candidates and already_asked is None:
+        anyone = await eligible(session, decision, hours, location.timezone, now, use_hours=False)
+        if anyone and resolved.settings.after_hours == "on_call":
+            candidates = [(m, p) for m, p in anyone if m.on_call]
+        if not candidates:
+            reason = "after_hours" if anyone else "no_eligible_approver"
+            await decisions.expire(session, decision, reason)
+            await session.refresh(decision)
+            return None
     for membership, person in candidates:
         ask = DecisionAsk(
             decision_id=decision.id, person_id=person.id, membership_id=membership.id, channel="sms"
@@ -236,10 +253,20 @@ async def closed_reply(session: AsyncSession, decision: Decision) -> str:
     return f"#{decision.short_code} · Handled by {name} ✓" if name else "That request has closed."
 
 
+def accepts_late_answers(decision: Decision, now: datetime) -> bool:
+    """D16: expired, not yet late-answered, and inside LATE_ANSWER_WINDOW."""
+    return (
+        decision.status == "expired"
+        and decision.late_outcome is None
+        and now < decision.deadline_at + LATE_ANSWER_WINDOW
+    )
+
+
 async def answer(session: AsyncSession, channel: Channel, ask: DecisionAsk, cmd: Command) -> str:
     """Apply one approver's reply (SMS or link). Returns what to tell them."""
     decision = await session.get_one(Decision, ask.decision_id)
-    if decision.status != "pending" or ask.responded_at is not None:
+    late = accepts_late_answers(decision, utcnow())
+    if (decision.status != "pending" and not late) or ask.responded_at is not None:
         return await closed_reply(session, decision)
     membership = await session.get_one(Membership, ask.membership_id)
     code = decision.short_code
@@ -255,10 +282,18 @@ async def answer(session: AsyncSession, channel: Channel, ask: DecisionAsk, cmd:
     allowed = membership.active and membership.can_approve
     if cmd.kind != "decline" and needed is not None and needed > membership.authority_limit:
         allowed = False
+    if not allowed and late:
+        await session.commit()
+        return f"#{code} is above your approval limit."
     if not allowed:
         await session.commit()
         await advance(session, channel, decision)
         return f"#{code} is above your approval limit, so I've asked someone else."
+    if late:
+        if await decisions.late_answer(session, decision.id, cmd.kind, cmd.value) is None:
+            await session.refresh(decision)
+            return await closed_reply(session, decision)
+        return f"Thanks. #{code} had already timed out, so I've passed your answer on."
 
     template = getattr(resolved.settings.on_answer, cmd.kind) if resolved else ""
     say = render(template, {"value": cmd.value}) or ""

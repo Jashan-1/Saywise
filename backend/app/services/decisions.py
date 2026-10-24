@@ -7,13 +7,15 @@ from datetime import timedelta
 from decimal import Decimal
 from typing import Any
 
-from sqlalchemy import func, select, update
+from pydantic import ValidationError
+from sqlalchemy import and_, func, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.constants import WAIT_CHANNEL
 from app.models import Decision, utcnow
-from app.schemas import DecisionIn
+from app.schemas import DecisionIn, OnTimeout
+from app.services import callbacks
 from app.services.policy_engine import Verdict, evaluate
 from app.services.settings import resolve as resolve_settings
 
@@ -107,6 +109,9 @@ async def create(
         decision.decided_at = now
     session.add(decision)
     try:
+        await session.flush()
+        if decision.status == "decided":
+            callbacks.enqueue(session, decision, "decision.decided")
         await session.commit()
     except IntegrityError:
         await session.rollback()
@@ -120,6 +125,24 @@ async def create(
     return decision
 
 
+async def _transition(
+    session: AsyncSession, decision_id: str, where: Any, values: dict[str, Any], event: str
+) -> Decision | None:
+    """Every state change is one conditional UPDATE, so the first one wins (§7.3). NOTIFY and the
+    callback ride in the same transaction. None if the condition no longer held."""
+    decision = await session.scalar(
+        update(Decision)
+        .where(Decision.id == decision_id, where)
+        .values(**values)
+        .returning(Decision)
+    )
+    if decision is not None:
+        await session.execute(select(func.pg_notify(WAIT_CHANNEL, decision_id)))
+        callbacks.enqueue(session, decision, event)
+    await session.commit()
+    return decision
+
+
 async def resolve(
     session: AsyncSession,
     decision_id: str,
@@ -128,25 +151,68 @@ async def resolve(
     person_id: str,
     say: str,
 ) -> Decision | None:
-    """A person's answer. First valid answer wins: one conditional UPDATE, with NOTIFY in the
-    same transaction so waiters wake only once it is committed. None if it was already settled."""
-    decision = await session.scalar(
-        update(Decision)
-        .where(Decision.id == decision_id, Decision.status == "pending")
-        .values(
-            status="decided",
-            outcome=outcome,
-            value=value,
-            say=say,
-            reason="human",
-            decided_by="human",
-            decided_by_person_id=person_id,
-            decided_at=utcnow(),
-            next_action_at=None,
-        )
-        .returning(Decision)
+    """A person's answer while the decision is pending."""
+    return await _transition(
+        session,
+        decision_id,
+        Decision.status == "pending",
+        {
+            "status": "decided",
+            "outcome": outcome,
+            "value": value,
+            "say": say,
+            "reason": "human",
+            "decided_by": "human",
+            "decided_by_person_id": person_id,
+            "decided_at": utcnow(),
+            "next_action_at": None,
+        },
+        "decision.decided",
     )
-    if decision is not None:
-        await session.execute(select(func.pg_notify(WAIT_CHANNEL, decision_id)))
-    await session.commit()
-    return decision
+
+
+async def expire(session: AsyncSession, decision: Decision, reason: str) -> Decision | None:
+    """Nobody answered in time (or nobody can): the configured defer/decline, never approve."""
+    try:
+        resolved = await resolve_settings(session, decision.location_id, decision.type)
+        on_timeout = resolved.settings.on_timeout if resolved else OnTimeout()
+    except ValidationError:  # stored settings went bad: fall back to the floor, not a crash
+        on_timeout = OnTimeout()
+    return await _transition(
+        session,
+        decision.id,
+        Decision.status == "pending",
+        {
+            "status": "expired",
+            "outcome": on_timeout.outcome,
+            "say": on_timeout.say,
+            "reason": reason,
+            "decided_by": "timeout",
+            "decided_at": utcnow(),
+            "next_action_at": None,
+        },
+        "decision.expired",
+    )
+
+
+async def cancel(session: AsyncSession, decision_id: str) -> Decision | None:
+    return await _transition(
+        session,
+        decision_id,
+        Decision.status == "pending",
+        {"status": "cancelled", "reason": "cancelled", "next_action_at": None},
+        "decision.cancelled",
+    )
+
+
+async def late_answer(
+    session: AsyncSession, decision_id: str, outcome: str, value: Decimal | None
+) -> Decision | None:
+    """D16: an answer after expiry, inside the window, is passed on but changes nothing else."""
+    return await _transition(
+        session,
+        decision_id,
+        and_(Decision.status == "expired", Decision.late_outcome.is_(None)),
+        {"late_outcome": outcome, "late_value": value},
+        "decision.late_answer",
+    )

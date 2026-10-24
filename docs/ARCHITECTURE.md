@@ -246,7 +246,9 @@ late human answer ─► late_outcome ─► callback "decision.late_answer"
 
 ### 7.2 Async
 
-`mode:"async"` returns `202 pending` immediately. The result goes to `callback_url` and can also be polled.
+`mode:"async"` returns `202` without waiting (the first ask still goes out inline, as in live mode). The result goes to `callback_url` and can also be polled.
+
+Callbacks fire on every final state (`decision.decided`, `decision.expired`, `decision.cancelled`) and on `decision.late_answer`. They go through the `callback_deliveries` outbox: 8 attempts with backoff from 30 s doubling to 1 h, HTTPS only, and only to hosts whose every resolved address is public.
 
 ### 7.3 States
 
@@ -309,6 +311,8 @@ Approvers are drawn from memberships on the location's scope chain: active, `can
 
 - `defer`: expire immediately with the `on_timeout` outcome.
 - `on_call`: ask members with `on_call=true`, ignoring their hours.
+
+This applies only before anyone has been asked. If nobody is eligible even ignoring hours, the decision expires at once with `reason: "no_eligible_approver"`, so a live call gets the safe default immediately instead of at the deadline. Once someone has been asked and nobody is left, the decision waits for its deadline in case they answer.
 
 ### 9.2 Auto-tuned stats (not client knobs)
 

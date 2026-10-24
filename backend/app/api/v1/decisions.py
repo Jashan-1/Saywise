@@ -1,6 +1,6 @@
 from typing import Annotated, Literal
 
-from fastapi import APIRouter, Header, HTTPException, Query
+from fastapi import APIRouter, Header, HTTPException, Query, Response
 from fastapi.exceptions import RequestValidationError
 from pydantic import AwareDatetime, ValidationError
 from sqlalchemy import select
@@ -61,8 +61,11 @@ async def create_decision(
     p: PrincipalDep,
     session: SessionDep,
     channel: ChannelDep,
+    response: Response,
     idempotency_key: Annotated[str | None, Header(max_length=255)] = None,
 ) -> DecisionOut:
+    """live: answers within wait_ms when it can. async: 202 at once; the result goes to
+    callback_url and can be polled."""
     location_id = body.location_id or (p.scope[1] if p.scope[0] == "location" else None)
     if location_id is None:
         raise HTTPException(422, "location_id is required unless the key is location-scoped")
@@ -77,7 +80,9 @@ async def create_decision(
         raise RequestValidationError(e.errors(include_url=False)) from None
     if decision.status == "pending" and decision.short_code is None:  # new: first ask, inline
         await escalation.advance(session, channel, decision)
-    if body.wait_ms and decision.status == "pending":
+    if body.mode == "async":
+        response.status_code = 202
+    elif body.wait_ms and decision.status == "pending":
         await wait_for(session, decision, body.wait_ms)
     return await to_out(session, decision)
 
@@ -95,6 +100,18 @@ async def get_decision(
     await authorize(session, p, "location", decision.location_id, "read")
     if wait_ms and decision.status == "pending":
         await wait_for(session, decision, wait_ms)
+    return await to_out(session, decision)
+
+
+@router.post("/decisions/{decision_id}/cancel")
+async def cancel_decision(decision_id: str, p: PrincipalDep, session: SessionDep) -> DecisionOut:
+    decision = await session.get(Decision, decision_id)
+    if decision is None:
+        raise HTTPException(404, "Not found")
+    await authorize(session, p, "location", decision.location_id, "decide")
+    if await decisions.cancel(session, decision_id) is None:
+        raise HTTPException(409, "Only a pending decision can be cancelled")
+    await session.refresh(decision)
     return await to_out(session, decision)
 
 

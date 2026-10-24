@@ -6,15 +6,16 @@ from urllib.parse import parse_qsl
 
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import HTMLResponse, Response
-from sqlalchemy import select
+from sqlalchemy import and_, or_, select
 from twilio.request_validator import RequestValidator
 
 from app.api.deps import ChannelDep, SessionDep
 from app.channels.base import Channel
 from app.core.config import get_settings
+from app.core.constants import LATE_ANSWER_WINDOW
 from app.core.logging import log
 from app.core.security import verify_token
-from app.models import Decision, DecisionAsk, Location, Membership, Person
+from app.models import Decision, DecisionAsk, Location, Membership, Person, utcnow
 from app.services import escalation
 from app.services.sms_commands import Command, parse
 
@@ -59,7 +60,14 @@ async def handle_sms(session: SessionDep, channel: Channel, phone: str, body: st
                 DecisionAsk.person_id == person.id,
                 DecisionAsk.sent_at.is_not(None),
                 DecisionAsk.responded_at.is_(None),
-                Decision.status == "pending",
+                or_(
+                    Decision.status == "pending",
+                    and_(  # still taking late answers (D16)
+                        Decision.status == "expired",
+                        Decision.late_outcome.is_(None),
+                        Decision.deadline_at > utcnow() - LATE_ANSWER_WINDOW,
+                    ),
+                ),
             )
             .order_by(Decision.created_at)
         )
@@ -138,7 +146,8 @@ async def approval_page(token: str, session: SessionDep) -> HTMLResponse:
     if ask is None:
         return page("Link not valid", "<p>This link has expired or is not valid.</p>", 404)
     decision = await session.get_one(Decision, ask.decision_id)
-    if decision.status != "pending" or ask.responded_at is not None:
+    late = escalation.accepts_late_answers(decision, utcnow())
+    if (decision.status != "pending" and not late) or ask.responded_at is not None:
         reply = await escalation.closed_reply(session, decision)
         return page(f"#{decision.short_code}", f"<p>{html.escape(reply)}</p>")
     location = await session.get_one(Location, decision.location_id)
