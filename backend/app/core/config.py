@@ -1,5 +1,6 @@
 from functools import lru_cache
 from pathlib import Path
+from typing import Literal
 
 from pydantic import SecretStr, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -24,6 +25,12 @@ class Settings(BaseSettings):
     ai_model: str = ""
     ai_api_key: SecretStr = SecretStr("")
     log_level: str = "INFO"
+    smtp_host: str = ""
+    smtp_port: int = 587
+    smtp_security: Literal["starttls", "ssl", "none"] = "starttls"
+    smtp_username: str = ""
+    smtp_password: SecretStr = SecretStr("")
+    smtp_from: str = ""
 
     @field_validator("signing_secret")
     @classmethod

@@ -121,3 +121,25 @@ async def test_membership_rules(client: httpx.AsyncClient, make_tree) -> None:
         assert (
             await client.post("/v1/people", json={"phone": phone}, headers=h)
         ).status_code == 422
+
+
+async def test_membership_email(client: httpx.AsyncClient, make_tree) -> None:
+    a, b = await make_tree("A"), await make_tree("B")
+    _, r = await add_member(
+        client, a.agency_key, "+14085550190", ("agency", a.agency.id), "Raj", email="raj@a.example"
+    )
+    assert r.status_code == 201 and r.json()["email"] == "raj@a.example"
+    _, r = await add_member(client, b.agency_key, "+14085550190", ("agency", b.agency.id), "R")
+    assert r.json()["email"] is None  # emails are per agency, like names
+    m = r.json()["id"]
+    for bad in ("not-an-email", "a@b", "two@@x.example"):
+        r = await client.patch(
+            f"/v1/memberships/{m}", json={"email": bad}, headers=auth(b.agency_key)
+        )
+        assert r.status_code == 422, bad
+    r = await client.patch(
+        f"/v1/memberships/{m}", json={"email": "r@b.example"}, headers=auth(b.agency_key)
+    )
+    assert r.json()["email"] == "r@b.example"
+    r = await client.patch(f"/v1/memberships/{m}", json={"email": None}, headers=auth(b.agency_key))
+    assert r.json()["email"] is None

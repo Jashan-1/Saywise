@@ -12,7 +12,17 @@ request_id: ContextVar[str | None] = ContextVar("request_id", default=None)
 
 # Only these extras are emitted. Anything else passed via `extra=` is dropped, so request bodies,
 # context, phone numbers and AI text cannot leak into logs by accident.
-EXTRA_FIELDS = ("agency_id", "location_id", "decision_id", "latency_ms", "method", "path", "status")
+EXTRA_FIELDS = (
+    "agency_id",
+    "location_id",
+    "decision_id",
+    "latency_ms",
+    "method",
+    "path",
+    "status",
+    "channel",
+    "error",  # an exception's type name only: provider messages can contain phone numbers
+)
 
 log = logging.getLogger("sayso")
 

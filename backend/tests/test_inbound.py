@@ -88,7 +88,7 @@ async def test_first_ask_goes_to_the_lowest_sufficient_authority(
     assert to == LEE
     lines = text.splitlines()
     assert re.fullmatch(
-        r"SaySo #[2-9A-HJ-NP-Z]{3} · Location A · loaner_car · amount \$40", lines[0]
+        r"SaySo #[2-9A-HJ-NP-Z]{3} - Location A - loaner_car - amount \$40", lines[0]
     )
     assert lines[1:3] == ["Needs a loaner <today>", "1=Yes 2=No or reply a number to counter"]
     assert "/v1/approve/" in lines[3]
@@ -141,7 +141,7 @@ async def test_counter_must_be_below_the_amount(client, esc: Esc, channel: FakeC
     """D21: a counter is in amount's unit (a discount here), > 0 and < what was asked."""
     key = esc.tree.location_key
     d = await ask(client, key, 40, type="price_adjustment")  # the template escalates
-    assert " · discount $40" in channel.to(LEE)[-1].splitlines()[0]  # the SMS shows the unit
+    assert " - discount $40" in channel.to(LEE)[-1].splitlines()[0]  # the SMS shows the unit
     for bad in ("820", "40", "0"):
         await sms(client, LEE, bad)
         assert channel.to(LEE)[-1] == "Counter must be a discount under $40."
@@ -164,9 +164,9 @@ async def test_others_hear_it_was_handled(client, esc: Esc, channel: FakeChannel
     code = code_in(channel.to(RAJ)[-1])
 
     await sms(client, RAJ, "1")
-    assert channel.to(LEE)[-1] == f"SaySo #{code} · Handled by Raj ✓"
+    assert channel.to(LEE)[-1] == f"SaySo #{code} - Handled by Raj"
     await sms(client, LEE, "1")  # D16: a reply to a decided decision
-    assert channel.to(LEE)[-1] == f"#{code} · Handled by Raj ✓"
+    assert channel.to(LEE)[-1] == f"#{code} - Handled by Raj"
     assert (await fetch(client, key, d["id"]))["approver"]["name"] == "Raj"
 
 
@@ -306,10 +306,16 @@ async def test_approval_link(client, esc: Esc, channel: FakeChannel, session, ca
 async def test_bad_links(client, esc: Esc, channel: FakeChannel, session) -> None:
     await ask(client, esc.tree.location_key, 40)
     link = link_in(channel.to(LEE)[-1])
-    ask_row = await session.scalar(select(DecisionAsk))
+    ask_row = await session.scalar(
+        select(DecisionAsk).where(DecisionAsk.person_id == esc.lee.person_id)
+    )
     secret = get_settings().signing_secret.get_secret_value().encode()
-    expired = sign_token(f"{ask_row.id}:{ask_row.person_id}", int(time.time()) - 1, secret)
-    wrong_person = sign_token(f"{ask_row.id}:{esc.raj.person_id}", int(time.time()) + 600, secret)
+    ask_part = ask_row.id.removeprefix("ask_")
+    expired = sign_token(ask_part, int(time.time()) - 1, secret, bind=ask_row.person_id)
+    wrong_person = sign_token(ask_part, int(time.time()) + 600, secret, bind=esc.raj.person_id)
+    valid = sign_token(ask_part, int(time.time()) + 600, secret, bind=ask_row.person_id)
+    assert (await client.get(f"/v1/approve/{valid}")).status_code == 200  # the control case
+    assert len(link) < 100  # short enough for SMS (D23)
     for url in (
         link[:-2] + "xx",
         f"/v1/approve/{expired}",
@@ -318,3 +324,94 @@ async def test_bad_links(client, esc: Esc, channel: FakeChannel, session) -> Non
     ):
         assert (await client.get(url)).status_code == 404
         assert (await client.post(url, data={"action": "approve"})).status_code == 404
+
+
+LEE_EMAIL, RAJ_EMAIL = "lee@dealer.example", "raj@dealer.example"
+
+
+async def test_asks_go_by_sms_and_email(client, esc: Esc, channel: FakeChannel, session) -> None:
+    esc.lee.email = LEE_EMAIL
+    await session.commit()
+    long_summary = "Customer wants a loaner for three days. " * 20
+    await ask(client, esc.tree.location_key, 40, summary=long_summary)
+    [sms_text] = channel.to(LEE)
+    [email] = channel.to(LEE_EMAIL)
+    assert sms_text.isascii() and len(sms_text) <= 306  # 2 segments by default
+    assert (
+        long_summary.strip() in email and "/v1/approve/" in email
+    )  # email keeps the whole summary
+    row = await session.scalar(
+        select(DecisionAsk).where(DecisionAsk.person_id == esc.lee.person_id)
+    )
+    assert row.channel == "sms,email"
+
+    await sms(client, LEE, "1")
+    d = (
+        await session.scalar(select(DecisionAsk).where(DecisionAsk.person_id == esc.lee.person_id))
+    ).decision_id
+    assert (await fetch(client, esc.tree.location_key, d))["outcome"] == "approve"
+
+
+async def test_max_segments_setting(client, esc: Esc, channel: FakeChannel, session) -> None:
+    esc.tree.agency.settings = {**esc.tree.agency.settings, "sms": {"max_segments": 3}}
+    await session.commit()
+    await ask(client, esc.tree.location_key, 40, summary="x" * 1000)
+    assert 306 < len(channel.to(LEE)[0]) <= 459
+
+
+async def test_opted_out_people_still_get_email(
+    client, esc: Esc, channel: FakeChannel, session
+) -> None:
+    esc.lee.email = LEE_EMAIL
+    await session.commit()
+    await sms(client, LEE, "STOP")
+    await ask(client, esc.tree.location_key, 40)
+    assert channel.to(LEE) == [] and len(channel.to(LEE_EMAIL)) == 1
+
+
+class FailingEmail(FakeChannel):
+    async def send(self, to: str, text: str) -> str:
+        if "@" in to:
+            raise ConnectionRefusedError(f"smtp refused {to}")
+        return await super().send(to, text)
+
+
+async def test_send_failures_are_logged_without_addresses(
+    make_tree, add_member, session, caplog
+) -> None:
+    t: Tree = await make_tree("A")
+    t.agency.settings = {"contact_hours": None}
+    m = await add_member(t.agency.id, ("agency", t.agency.id), LEE, "Lee", 100, email=LEE_EMAIL)
+    from app.schemas import DecisionIn
+    from app.services import decisions
+
+    d = await decisions.create(
+        session, t.agency.id, t.location.id, DecisionIn(type="refund", summary="x"), None
+    )
+    channel = FailingEmail()
+    with caplog.at_level(logging.ERROR, logger="sayso"):
+        [sent] = await escalation.advance(session, channel, d)
+    assert sent.channel == "sms" and channel.to(LEE)  # SMS still counts
+    [record] = [r for r in caplog.records if r.levelname == "ERROR"]
+    assert (record.msg, record.channel, record.error, record.decision_id) == (
+        "send failed",
+        "email",
+        "ConnectionRefusedError",
+        d.id,
+    )
+    from app.core.logging import JsonFormatter
+
+    line = JsonFormatter().format(record)
+    assert LEE_EMAIL not in line and LEE not in line and m.person_id not in line
+
+
+async def test_handled_by_goes_to_email_too(
+    client, esc: Esc, channel: FakeChannel, session
+) -> None:
+    esc.raj.email = RAJ_EMAIL
+    await session.commit()
+    d = await ask(client, esc.tree.location_key, 40)
+    await escalation.advance(session, channel, await session.get(Decision, d["id"]))
+    await sms(client, LEE, "1")
+    assert channel.to(RAJ_EMAIL)[-1].endswith("Handled by Lee")
+    assert channel.to(RAJ)[-1].endswith("Handled by Lee")

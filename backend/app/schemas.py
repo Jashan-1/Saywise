@@ -24,6 +24,10 @@ Money = Annotated[
 ]
 Name = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=200)]
 E164 = Annotated[str, StringConstraints(pattern=r"^\+[1-9]\d{6,14}$")]
+Email = Annotated[
+    str,
+    StringConstraints(strip_whitespace=True, max_length=254, pattern=r"^[^@\s]+@[^@\s]+\.[^@\s]+$"),
+]
 HttpsUrl = Annotated[AnyUrl, UrlConstraints(allowed_schemes=["https"], max_length=2083)]
 
 Day = Literal["mon", "tue", "wed", "thu", "fri", "sat", "sun"]
@@ -110,6 +114,10 @@ class OnAnswer(_In):
     counter: str = Field("The best we can do is {value}.", max_length=300)
 
 
+class Sms(_In):
+    max_segments: int = Field(2, ge=1, le=10)  # D23: the summary is trimmed to fit
+
+
 class Ai(_In):
     summaries: bool = True
     recommendations: bool = True
@@ -130,6 +138,7 @@ class ClientSettings(_In):
     after_hours: Literal["defer", "on_call"] = "defer"
     on_timeout: OnTimeout = Field(default_factory=OnTimeout)
     on_answer: OnAnswer = Field(default_factory=OnAnswer)
+    sms: Sms = Field(default_factory=Sms)
     ai: Ai = Field(default_factory=Ai)
     retention: Retention = Field(default_factory=Retention)
     locale: Literal["en"] = "en"
@@ -194,6 +203,7 @@ class MembershipIn(_In):
     scope_type: ScopeType
     scope_id: str
     display_name: Name
+    email: Email | None = None
     role: Role
     authority_limit: Money = Decimal(0)
     can_approve: bool = True
@@ -203,9 +213,10 @@ class MembershipIn(_In):
 
 
 class MembershipPatch(_Patch):
-    NULLABLE = frozenset({"contact_hours", "max_asks_per_hour"})
+    NULLABLE = frozenset({"contact_hours", "max_asks_per_hour", "email"})
 
     display_name: Name | None = None
+    email: Email | None = None
     role: Role | None = None
     authority_limit: Money | None = None
     can_approve: bool | None = None
@@ -222,6 +233,7 @@ class MembershipOut(_Out):
     scope_type: str
     scope_id: str
     display_name: str
+    email: str | None
     role: str
     authority_limit: Money
     can_approve: bool

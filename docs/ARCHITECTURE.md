@@ -31,6 +31,8 @@ Status: v0.2 design (after design review) · Owner: Jashan Singh · License: MIT
 | D19 | API key management | `POST/GET /v1/api_keys` and `POST /v1/api_keys/{id}/revoke`, agency keys only. A key can't revoke itself |
 | D20 | Decision `say` and `reason` | Stored on `decisions`. `reason` is one of `rule_matched`, `policy_default`, `no_policy`, `human`, `timeout`, `after_hours`, `no_eligible_approver`, `cancelled`. Retention scrubs `say` together with `context` |
 | D21 | Counter-offers | A counter is **always in `amount`'s unit** (for `price_adjustment`, the discount), more than 0 and less than the amount requested. Anything else gets "Counter must be a discount under $50" and the ask stays open; it is not escalated. The SMS shows the unit |
+| D23 | SMS length | **Plain characters only** (accents stripped, `·`/`✓`/curly quotes replaced) so a message stays GSM-7 (160 per segment, 153 when split) instead of UCS-2 (70). Short approval link (~95 chars): the person is signed into the token, not written in it, and the signature is 128 bits. `sms.max_segments` (default 2) trims the summary, then drops the reply-help line; a message that still overflows is sent and logged as an error |
+| D24 | Email | **Every assigned contact with an email gets both SMS and email.** Email carries the full ask (whole summary, approval link) and notifications: "handled by X" (SMS + email) and expiry (email only). Plain SMTP (`SAYSO_SMTP_*`), addresses stored per membership like names. People who replied STOP still get email. Send failures are logged as errors with the decision id and channel only |
 | D22 | Starter templates | **No approve rules** (no rules at all): everything escalates to a human until an agency or owner adds an approve rule on purpose |
 
 ## 1. Problem
@@ -214,6 +216,7 @@ code defaults → agency.settings → business.settings → location.settings
 | `on_timeout.outcome` | `"defer"` | **`"defer"` \| `"decline"` only** (fixed floor) |
 | `on_timeout.say` / `hold_say` | English templates | ≤ 300 chars |
 | `on_answer.approve` / `decline` / `counter` | English templates | ≤ 300 chars. What the agent says after a person answers; `{value}` is the counter-offer |
+| `sms.max_segments` | 2 | 1 – 10. One segment leaves room for little beyond the header and link (D23) |
 | `ai.summaries` / `ai.recommendations` / `ai.rule_drafting` | true / true / true | Any scope may disable |
 | `retention.context_days` | 90 | 1 – 3650 |
 | `locale` | `"en"` | `"en"` only in v1 (D13) |
@@ -351,10 +354,10 @@ wait = min(max(t80 of chosen), window) ; next_action_at = now + wait
 ### 10.1 Approver ask
 
 ```
-SaySo #K7Z · Fremont Ford · Price adjustment · discount $50
+SaySo #K7Z - Fremont Ford - Price adjustment - discount $50
 Repeat customer: 3 jobs, 3 approved. AI suggests: APPROVE (within usual range)
 1=Yes 2=No or reply a number to counter
-https://api.sayso.example/v1/approve/Xy8...
+https://api.sayso.example/v1/approve/01JB...AB.1761300000.Xy8...
 ```
 
 The AI line is omitted if AI is disabled, slow or failing (§11).
@@ -378,7 +381,7 @@ The AI line is omitted if AI is disabled, slow or failing (§11).
 
 ### 10.3 Approval link and inbound security
 
-- `GET/POST /v1/approve/{token}`: the token is HMAC-SHA256 over `ask_id`, `person_id` and `exp`, single-use per ask. The page is server-rendered with Approve, Decline and Counter buttons. No login or app.
+- `GET/POST /v1/approve/{token}`: the token is HMAC-SHA256 over `ask_id`, `person_id` and `exp`, single-use per ask. It carries only the ask id and `exp`; the verifier supplies the ask's `person_id` (D23). The page is server-rendered with Approve, Decline and Counter buttons. No login or app.
 - `POST /v1/inbound/twilio/sms` is validated with `twilio.request_validator.RequestValidator`. A bad signature returns `403`.
 
 The `Channel` protocol (`send(person, text) -> provider_id`) is the seam for Slack and WhatsApp later.
@@ -500,7 +503,7 @@ Ids are prefixed ULIDs (`agy_ bus_ loc_ per_ mem_ key_ pol_ dec_ ask_ drf_ cbd_ 
 | `locations` | `agency_id`, `business_id`, `name`, `timezone`, `settings` |
 | `api_keys` | `agency_id`, `scope_type`, `scope_id`, `prefix`, `key_hash`, `last_used_at`, `revoked_at` |
 | `people` | `phone` (E.164, unique), `sms_opted_out` |
-| `memberships` | `person_id`, `agency_id`, `scope_type`, `scope_id`, `display_name`, `role`, `authority_limit`, `can_approve`, `on_call`, `contact_hours` jsonb, `max_asks_per_hour`, `active` |
+| `memberships` | `person_id`, `agency_id`, `scope_type`, `scope_id`, `display_name`, `email`, `role`, `authority_limit`, `can_approve`, `on_call`, `contact_hours` jsonb, `max_asks_per_hour`, `active` |
 | `policies` | `agency_id` (null for system), `scope_type`, `scope_id`, `decision_type`, `version`, `body` jsonb, `active`, `created_by` (key or person), `source` (`api/sms/suggestion/clone`), `source_text` |
 | `decisions` | `agency_id`, `location_id`, `type`, `mode`, `status`, `summary`, `subject`, `context`, `customer_ref`, `amount`, `policy_id`, `policy_version`, `rule_id`, `outcome`, `value`, `say`, `reason`, `decided_by`, `decided_by_person_id`, `late_outcome`, `short_code`, `deadline_at`, `next_action_at`, `callback_url`, `idempotency_key`, `request_hash`, `context_scrubbed_at`, `decided_at` |
 | `decision_asks` | `decision_id`, `person_id`, `membership_id`, `channel`, `provider_message_id`, `ai_recommendation`, `sent_at`, `responded_at`, `response`, `response_value` |
@@ -568,6 +571,12 @@ SAYSO_AI_PROVIDER=anthropic
 SAYSO_AI_MODEL=
 SAYSO_AI_API_KEY=
 SAYSO_LOG_LEVEL=INFO
+SAYSO_SMTP_HOST=            # email (D24); port 587 + starttls or 465 + ssl
+SAYSO_SMTP_PORT=587
+SAYSO_SMTP_SECURITY=starttls
+SAYSO_SMTP_USERNAME=
+SAYSO_SMTP_PASSWORD=
+SAYSO_SMTP_FROM=
 ```
 
 - Client behavior lives in `settings` jsonb per scope (§6), **not** in env. Env is only for how the process runs.

@@ -5,7 +5,8 @@ from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.channels.base import Channel
+from app.channels.base import Channel, Router
+from app.channels.email_smtp import SmtpEmail
 from app.channels.twilio_sms import TwilioSms
 from app.core.config import get_settings
 from app.core.db import get_session
@@ -40,7 +41,8 @@ PrincipalDep = Annotated[Principal, Depends(get_principal)]
 
 
 def get_channel() -> Channel:
-    return TwilioSms(get_settings())
+    settings = get_settings()
+    return Router(TwilioSms(settings), SmtpEmail(settings))
 
 
 ChannelDep = Annotated[Channel, Depends(get_channel)]

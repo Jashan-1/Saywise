@@ -138,6 +138,7 @@ class Membership(Timestamps, Base):
     scope_type: Mapped[str]
     scope_id: Mapped[str]
     display_name: Mapped[str]
+    email: Mapped[str | None]  # per agency, like the name (D24)
     role: Mapped[str]
     authority_limit: Mapped[Decimal] = mapped_column(default=Decimal(0), server_default="0")
     can_approve: Mapped[bool] = mapped_column(default=True, server_default=true())

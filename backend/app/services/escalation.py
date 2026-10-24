@@ -24,7 +24,7 @@ from app.core.constants import (
 from app.core.logging import log
 from app.core.security import sign_token
 from app.models import Decision, DecisionAsk, Location, Membership, Person, utcnow
-from app.services import decisions, history, scopes
+from app.services import decisions, history, scopes, sms_text
 from app.services.policy_engine import format_value, render
 from app.services.settings import resolve as resolve_settings
 from app.services.sms_commands import Command
@@ -66,7 +66,10 @@ def counter_problem(value: Decimal, amount: Decimal | None, unit: str) -> str | 
     return f"Counter must be {article} {unit} under ${format_value(amount)}."
 
 
-def ask_text(
+REPLY_HELP = "1=Yes 2=No or reply a number to counter"
+
+
+def ask_lines(
     code: str,
     location: str,
     label: str,
@@ -74,19 +77,20 @@ def ask_text(
     amount: Decimal | None,
     summary: str | None,
     link: str,
-) -> str:
-    head = f"SaySo #{code} · {location} · {label}"
+) -> list[str]:
+    """[head, summary, how to reply, link]; the summary is index 1, the one SMS trims."""
+    head = f"SaySo #{code} - {location} - {label}"
     if amount is not None:
-        head += f" · {unit} ${format_value(amount)}"
-    lines = [head, (summary or "")[:160], "1=Yes 2=No or reply a number to counter", link]
-    return "\n".join(line for line in lines if line)
+        head += f" - {unit} ${format_value(amount)}"
+    return [head, summary or "", REPLY_HELP, link]
 
 
 def approval_link(ask: DecisionAsk, deadline_at: datetime) -> str:
     settings = get_settings()
     exp = int((deadline_at + LATE_ANSWER_WINDOW).timestamp())
     secret = settings.signing_secret.get_secret_value().encode()
-    token = sign_token(f"{ask.id}:{ask.person_id}", exp, secret)
+    # The person is signed into the token, not written in it, which keeps the link short (D23).
+    token = sign_token(ask.id.removeprefix("ask_"), exp, secret, bind=ask.person_id)
     return f"{settings.public_base_url.rstrip('/')}/v1/approve/{token}"
 
 
@@ -140,7 +144,7 @@ async def eligible(
             Membership.agency_id == decision.agency_id,
             Membership.active,
             Membership.can_approve,
-            Person.sms_opted_out.is_(False),
+            or_(Person.sms_opted_out.is_(False), Membership.email.is_not(None)),
             Person.id.not_in(asked),
         )
         .order_by(Membership.authority_limit, Membership.id)
@@ -251,6 +255,7 @@ async def advance(session: AsyncSession, channel: Channel, decision: Decision) -
     by_key = {m.id: (m, p) for m, p in candidates}
     remaining = decision.deadline_at - now
     needed = approvals_needed(decision, settings.escalation.two_person_over)
+    max_segments = settings.sms.max_segments
     sent: list[DecisionAsk] = []
     wait = timedelta(0)
     while by_key and not sent:  # replan without anyone whose SMS failed
@@ -274,22 +279,25 @@ async def advance(session: AsyncSession, channel: Channel, decision: Decision) -
             )
             session.add(ask)
             await session.flush()
-            link = approval_link(ask, decision.deadline_at)
-            text = ask_text(
+            lines = ask_lines(
                 decision.short_code or "",
                 location.name,
                 label,
                 unit,
                 decision.amount,
                 decision.summary,
-                link,
+                approval_link(ask, decision.deadline_at),
             )
-            try:
-                ask.provider_message_id = await channel.send(person.phone, text)
-            except Exception:
-                log.warning("approver sms failed", extra={"decision_id": decision.id})
+            sms = (
+                None
+                if person.sms_opted_out
+                else sms_text.fit(lines, 1, max_segments, decision.id, droppable=2)
+            )
+            email = "\n".join(line for line in lines if line)
+            used = await send_all(channel, decision.id, person.phone, membership.email, sms, email)
+            if not used:
                 continue  # the ask row stays, so this person isn't retried for this decision
-            ask.sent_at = now
+            ask.channel, ask.sent_at = ",".join(used), now
             sent.append(ask)
     decision.next_action_at = (
         min(now + wait, decision.deadline_at) if sent else decision.deadline_at
@@ -315,7 +323,9 @@ async def decider_name(session: AsyncSession, decision: Decision) -> str | None:
 async def closed_reply(session: AsyncSession, decision: Decision) -> str:
     """D16: decided → "Handled by X"; anything else no longer open → closed."""
     name = await decider_name(session, decision) if decision.status == "decided" else None
-    return f"#{decision.short_code} · Handled by {name} ✓" if name else "That request has closed."
+    if name:
+        return sms_text.plain(f"#{decision.short_code} - Handled by {name}")
+    return "That request has closed."
 
 
 def accepts_late_answers(decision: Decision, now: datetime) -> bool:
@@ -385,18 +395,63 @@ async def answer(session: AsyncSession, channel: Channel, ask: DecisionAsk, cmd:
         await session.refresh(decision)
         return await closed_reply(session, decision)
 
-    others = await session.scalars(
-        select(Person.phone)
-        .join(DecisionAsk, DecisionAsk.person_id == Person.id)
-        .where(
-            DecisionAsk.decision_id == decision.id,
-            DecisionAsk.person_id != ask.person_id,
-            DecisionAsk.sent_at.is_not(None),
-        )
-    )
-    for phone in others:
-        try:
-            await channel.send(phone, f"SaySo #{code} · Handled by {membership.display_name} ✓")
-        except Exception:
-            log.warning("handled-by sms failed", extra={"decision_id": decision.id})
+    handled = sms_text.plain(f"SaySo #{code} - Handled by {membership.display_name}")
+    await notify(session, channel, decision, handled, exclude=ask.person_id)
     return f"Done: #{code} {PAST_TENSE[cmd.kind]}."
+
+
+async def send_all(
+    channel: Channel,
+    decision_id: str,
+    phone: str,
+    email: str | None,
+    sms: str | None,
+    email_text: str | None,
+) -> list[str]:
+    """Send by SMS and email where there's something to send; return the channels that worked.
+    Failures are logged as errors with the decision id only, never the address or provider text."""
+    used = []
+    for kind, to, text in (("sms", phone, sms), ("email", email, email_text)):
+        if not to or not text:
+            continue
+        try:
+            await channel.send(to, text)
+            used.append(kind)
+        except Exception as e:
+            log.error(
+                "send failed",
+                extra={"decision_id": decision_id, "channel": kind, "error": type(e).__name__},
+            )
+    return used
+
+
+async def notify(
+    session: AsyncSession,
+    channel: Channel,
+    decision: Decision,
+    text: str,
+    exclude: str | None = None,
+    sms: bool = True,
+) -> None:
+    """Tell everyone who was asked. `sms=False` sends email only, for news nobody has to act on."""
+    rows = await session.execute(
+        select(Person.id, Person.phone, Person.sms_opted_out, Membership.email)
+        .join(DecisionAsk, DecisionAsk.person_id == Person.id)
+        .join(Membership, DecisionAsk.membership_id == Membership.id)
+        .where(DecisionAsk.decision_id == decision.id, DecisionAsk.sent_at.is_not(None))
+    )
+    for person_id, phone, opted_out, email in rows:
+        if person_id != exclude:
+            sms_body = text if sms and not opted_out else None
+            await send_all(channel, decision.id, phone, email, sms_body, text)
+
+
+async def notify_expired(session: AsyncSession, channel: Channel, decision: Decision) -> None:
+    """D24: email whoever was asked that time ran out; a late answer still gets passed on."""
+    location = await session.get_one(Location, decision.location_id)
+    text = sms_text.plain(
+        f"SaySo #{decision.short_code} - {location.name} - expired: nobody answered in time. "
+        f"The caller was told: {decision.outcome}. "
+        "You can still answer within 24 hours and it will be passed on."
+    )
+    await notify(session, channel, decision, text, sms=False)

@@ -237,3 +237,21 @@ async def test_two_workers_never_process_the_same_row() -> None:
     await asyncio.gather(step_decisions(slow), step_decisions(slow))
     assert slow.to(w.raj) and len(slow.to(w.raj)) == 1
     assert await asks(d) == 2
+
+
+async def test_expiry_is_emailed_to_whoever_was_asked() -> None:
+    w, ch = await world(), FakeChannel()
+    d = await new_decision(w, ch)
+    async with SessionLocal() as s:
+        await s.execute(
+            update(Membership)
+            .where(Membership.agency_id == w.agency_id)
+            .values(email="team@dealer.example")
+        )
+        await s.commit()
+    await shift(d, deadline_at=PAST, next_action_at=PAST)
+    sms_before = len(ch.to(w.lee))
+    await step_decisions(ch)
+    [notice] = ch.to("team@dealer.example")  # only Lee was asked, so one email
+    assert "expired: nobody answered in time" in notice and "defer" in notice
+    assert len(ch.to(w.lee)) == sms_before  # no SMS for news nobody has to act on

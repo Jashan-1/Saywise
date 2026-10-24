@@ -13,7 +13,8 @@ from sqlalchemy import or_, select, update
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.channels.base import Channel
+from app.channels.base import Channel, Router
+from app.channels.email_smtp import SmtpEmail
 from app.channels.twilio_sms import TwilioSms
 from app.core.config import get_settings
 from app.core.constants import (
@@ -45,7 +46,8 @@ async def step_decisions(channel: Channel) -> int:
             decision_id = decision.id
             try:
                 if decision.deadline_at <= utcnow():
-                    await decisions.expire(session, decision, "timeout")
+                    if expired := await decisions.expire(session, decision, "timeout"):
+                        await escalation.notify_expired(session, channel, expired)
                 else:
                     await escalation.advance(session, channel, decision)
             except Exception:
@@ -116,7 +118,7 @@ async def tick(channel: Channel, client: httpx.AsyncClient) -> int:
 
 async def run(stop: asyncio.Event) -> None:
     log.info("worker started")
-    channel = TwilioSms(get_settings())
+    channel = Router(TwilioSms(get_settings()), SmtpEmail(get_settings()))
     async with httpx.AsyncClient(timeout=CALLBACK_TIMEOUT_S) as client:
         while not stop.is_set():
             try:

@@ -131,12 +131,10 @@ def page(title: str, body: str, status: int = 200) -> HTMLResponse:
 
 async def ask_for(session: SessionDep, token: str) -> DecisionAsk | None:
     secret = get_settings().signing_secret.get_secret_value().encode()
-    data = verify_token(token, secret)
-    if data is None:
+    ask = await session.get(DecisionAsk, f"ask_{token.partition('.')[0]}")
+    if ask is None or verify_token(token, secret, bind=ask.person_id) is None:
         return None
-    ask_id, _, person_id = data.partition(":")
-    ask = await session.get(DecisionAsk, ask_id)
-    return ask if ask is not None and ask.person_id == person_id else None
+    return ask
 
 
 @router.get("/approve/{token}")

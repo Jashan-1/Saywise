@@ -30,26 +30,30 @@ def callback_secret(signing_secret: bytes, agency_id: str, version: int) -> str:
     return f"whsec_{mac.hexdigest()}"
 
 
-def _token_sig(data: str, exp: int, secret: bytes) -> str:
-    mac = hmac.new(secret, f"{data}.{exp}".encode(), hashlib.sha256).digest()
-    return base64.urlsafe_b64encode(mac).rstrip(b"=").decode()
+TOKEN_SIG_LEN = 22  # 128 bits of the HMAC in base64url; keeps SMS links short (D23)
 
 
-def sign_token(data: str, exp: int, secret: bytes) -> str:
-    """URL-safe `data.exp.sig`. `exp` is a unix timestamp; `data` must not contain '.'."""
+def _token_sig(data: str, exp: int, secret: bytes, bind: str) -> str:
+    mac = hmac.new(secret, f"{data}.{exp}.{bind}".encode(), hashlib.sha256).digest()
+    return base64.urlsafe_b64encode(mac).rstrip(b"=").decode()[:TOKEN_SIG_LEN]
+
+
+def sign_token(data: str, exp: int, secret: bytes, bind: str = "") -> str:
+    """URL-safe `data.exp.sig`. `exp` is a unix timestamp; `data` must not contain '.'.
+    `bind` is signed but not carried in the token: the verifier must supply the same value."""
     if "." in data:
         raise ValueError("token data must not contain '.'")
-    return f"{data}.{exp}.{_token_sig(data, exp, secret)}"
+    return f"{data}.{exp}.{_token_sig(data, exp, secret, bind)}"
 
 
-def verify_token(token: str, secret: bytes, now: float | None = None) -> str | None:
+def verify_token(token: str, secret: bytes, now: float | None = None, bind: str = "") -> str | None:
     """Return the signed data, or None if the token is malformed, tampered with or expired."""
     try:
         data, exp_s, sig = token.split(".")
         exp = int(exp_s)
     except ValueError:
         return None
-    expected = _token_sig(data, exp, secret)
+    expected = _token_sig(data, exp, secret, bind)
     if not hmac.compare_digest(sig.encode(), expected.encode()):
         return None
     return data if exp > (time.time() if now is None else now) else None
