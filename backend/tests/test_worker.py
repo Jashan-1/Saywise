@@ -47,7 +47,8 @@ def phone() -> str:
 
 async def world(agency_settings: dict[str, Any] | None = None, raj_on_call: bool = False) -> World:
     async with SessionLocal() as s:
-        agency = Agency(name="W", settings={"contact_hours": None, **(agency_settings or {})})
+        one_at_a_time = {"contact_hours": None, "escalation": {"max_fanout": 1}}
+        agency = Agency(name="W", settings={**one_at_a_time, **(agency_settings or {})})
         s.add(agency)
         await s.flush()
         business = Business(agency_id=agency.id, name="B")

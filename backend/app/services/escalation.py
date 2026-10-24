@@ -3,6 +3,7 @@ authority first, with a fixed wait. Also applies their answers (§9.4)."""
 
 import secrets
 from collections.abc import Mapping
+from dataclasses import dataclass
 from datetime import datetime, timedelta
 from decimal import Decimal
 from typing import Any
@@ -15,15 +16,15 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.channels.base import Channel
 from app.core.config import get_settings
 from app.core.constants import (
-    FIXED_WAIT,
     LATE_ANSWER_WINDOW,
     SHORT_CODE_ALPHABET,
     SHORT_CODE_LENGTH,
+    TARGET_P,
 )
 from app.core.logging import log
 from app.core.security import sign_token
 from app.models import Decision, DecisionAsk, Location, Membership, Person, utcnow
-from app.services import decisions, scopes
+from app.services import decisions, history, scopes
 from app.services.policy_engine import format_value, render
 from app.services.settings import resolve as resolve_settings
 from app.services.sms_commands import Command
@@ -174,20 +175,63 @@ async def eligible(
     return chosen
 
 
-async def advance(
-    session: AsyncSession, channel: Channel, decision: Decision
-) -> DecisionAsk | None:
-    """Ask the next eligible approver. With nobody left, wait for the deadline. If nobody can be
-    asked at all, after_hours decides (§9.1): defer expires now, on_call asks on-call members."""
+@dataclass(frozen=True)
+class Candidate:
+    key: str  # membership id
+    p_answer: float
+    t80: timedelta
+
+
+@dataclass(frozen=True)
+class Step:
+    ask: list[str]  # membership ids, best first
+    wait: timedelta
+
+
+def plan_step(
+    candidates: list[Candidate],
+    remaining: timedelta,
+    max_fanout: int,
+    approvals_needed: int = 1,
+) -> Step:
+    """§9.3, pure. `candidates` are eligible and in tie-break order (lowest authority first).
+    Ask the fewest, most responsive people that give TARGET_P of an answer (at least
+    `approvals_needed`, at most max_fanout), then wait their slowest t80, but never longer than
+    this step's share of the time left."""
+    ranked = sorted(candidates, key=lambda c: -c.p_answer)  # stable: keeps the tie-break order
+    tiers_left = max(1, -(-len(ranked) // max_fanout))
+    window = max(remaining, timedelta(0)) / tiers_left
+    chosen: list[Candidate] = []
+    p_none = 1.0
+    for c in ranked[:max_fanout]:
+        chosen.append(c)
+        p_none *= 1 - c.p_answer
+        if 1 - p_none >= TARGET_P and len(chosen) >= approvals_needed:
+            break
+    wait = min(max((c.t80 for c in chosen), default=timedelta(0)), window)
+    return Step([c.key for c in chosen], wait)
+
+
+def approvals_needed(decision: Decision, two_person_over: Decimal | None) -> int:
+    over = two_person_over is not None and decision.amount is not None
+    return 2 if over and decision.amount > two_person_over else 1  # type: ignore[operator]
+
+
+async def advance(session: AsyncSession, channel: Channel, decision: Decision) -> list[DecisionAsk]:
+    """Ask the next people the planner picks. With nobody left, wait for the deadline. If nobody
+    can be asked at all, after_hours decides (§9.1): defer expires now, on_call asks on-call
+    members."""
     if decision.short_code is None:
         await _assign_short_code(session, decision)
     resolved = await resolve_settings(session, decision.location_id, decision.type)
     if resolved is None:
         raise LookupError(decision.location_id)
+    settings = resolved.settings
     location = await session.get_one(Location, decision.location_id)
     label = resolved.policy.body.get("label", decision.type) if resolved.policy else decision.type
+    unit = unit_of(resolved.policy.body if resolved.policy else None)
     now = utcnow()
-    hours = resolved.settings.contact_hours
+    hours = settings.contact_hours
     candidates = await eligible(session, decision, hours, location.timezone, now)
     already_asked = await session.scalar(
         select(DecisionAsk.id).where(
@@ -196,41 +240,62 @@ async def advance(
     )
     if not candidates and already_asked is None:
         anyone = await eligible(session, decision, hours, location.timezone, now, use_hours=False)
-        if anyone and resolved.settings.after_hours == "on_call":
+        if anyone and settings.after_hours == "on_call":
             candidates = [(m, p) for m, p in anyone if m.on_call]
         if not candidates:
             reason = "after_hours" if anyone else "no_eligible_approver"
             await decisions.expire(session, decision, reason)
             await session.refresh(decision)
-            return None
-    for membership, person in candidates:
-        ask = DecisionAsk(
-            decision_id=decision.id, person_id=person.id, membership_id=membership.id, channel="sms"
+            return []
+
+    by_key = {m.id: (m, p) for m, p in candidates}
+    remaining = decision.deadline_at - now
+    needed = approvals_needed(decision, settings.escalation.two_person_over)
+    sent: list[DecisionAsk] = []
+    wait = timedelta(0)
+    while by_key and not sent:  # replan without anyone whose SMS failed
+        stats = await history.approver_stats(
+            session, [p.id for _, p in by_key.values()], remaining, now
         )
-        session.add(ask)
-        await session.flush()
-        link = approval_link(ask, decision.deadline_at)
-        text = ask_text(
-            decision.short_code or "",
-            location.name,
-            label,
-            unit_of(resolved.policy.body if resolved.policy else None),
-            decision.amount,
-            decision.summary,
-            link,
+        step = plan_step(
+            [Candidate(m.id, stats[p.id].p_answer, stats[p.id].t80) for m, p in by_key.values()],
+            remaining,
+            settings.escalation.max_fanout,
+            needed,
         )
-        try:
-            ask.provider_message_id = await channel.send(person.phone, text)
-        except Exception:
-            log.warning("approver sms failed", extra={"decision_id": decision.id})
-            continue  # the ask row stays, so this person isn't retried for this decision
-        ask.sent_at = now
-        decision.next_action_at = min(now + FIXED_WAIT, decision.deadline_at)
-        await session.commit()
-        return ask
-    decision.next_action_at = decision.deadline_at
+        wait = step.wait
+        for key in step.ask:
+            membership, person = by_key.pop(key)
+            ask = DecisionAsk(
+                decision_id=decision.id,
+                person_id=person.id,
+                membership_id=membership.id,
+                channel="sms",
+            )
+            session.add(ask)
+            await session.flush()
+            link = approval_link(ask, decision.deadline_at)
+            text = ask_text(
+                decision.short_code or "",
+                location.name,
+                label,
+                unit,
+                decision.amount,
+                decision.summary,
+                link,
+            )
+            try:
+                ask.provider_message_id = await channel.send(person.phone, text)
+            except Exception:
+                log.warning("approver sms failed", extra={"decision_id": decision.id})
+                continue  # the ask row stays, so this person isn't retried for this decision
+            ask.sent_at = now
+            sent.append(ask)
+    decision.next_action_at = (
+        min(now + wait, decision.deadline_at) if sent else decision.deadline_at
+    )
     await session.commit()
-    return None
+    return sent
 
 
 async def decider_name(session: AsyncSession, decision: Decision) -> str | None:
@@ -275,6 +340,10 @@ async def answer(session: AsyncSession, channel: Channel, ask: DecisionAsk, cmd:
         policy_body = resolved.policy.body if resolved and resolved.policy else None
         if problem := counter_problem(cmd.value, decision.amount, unit_of(policy_body)):
             return problem  # the ask stays open, so they can reply again
+    two_person_over = resolved.settings.escalation.two_person_over if resolved else None
+    required = approvals_needed(decision, two_person_over)
+    if required > 1 and cmd.kind == "counter":
+        return f"#{code} needs two approvals, so reply 1 to approve or 2 to decline."
     ask.responded_at, ask.response, ask.response_value = utcnow(), cmd.kind, cmd.value
 
     # Authority is re-checked now, not when the ask went out (§9.4).
@@ -282,6 +351,8 @@ async def answer(session: AsyncSession, channel: Channel, ask: DecisionAsk, cmd:
     allowed = membership.active and membership.can_approve
     if cmd.kind != "decline" and needed is not None and needed > membership.authority_limit:
         allowed = False
+    if not allowed:
+        ask.response = "over_limit"  # never counts towards a two-person approval
     if not allowed and late:
         await session.commit()
         return f"#{code} is above your approval limit."
@@ -295,6 +366,16 @@ async def answer(session: AsyncSession, channel: Channel, ask: DecisionAsk, cmd:
             return await closed_reply(session, decision)
         return f"Thanks. #{code} had already timed out, so I've passed your answer on."
 
+    if required > 1 and cmd.kind == "approve":
+        await session.flush()
+        approvals = await session.scalar(
+            select(func.count()).where(
+                DecisionAsk.decision_id == decision.id, DecisionAsk.response == "approve"
+            )
+        )
+        if (approvals or 0) < required:
+            await session.commit()
+            return f"Got it. #{code} needs one more approval."
     template = getattr(resolved.settings.on_answer, cmd.kind) if resolved else ""
     say = render(template, {"value": cmd.value}) or ""
     if (

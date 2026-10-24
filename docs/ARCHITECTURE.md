@@ -321,7 +321,7 @@ These come from `decision_asks` over the last 90 days, by hour bucket:
 - `p_answer(window)`: the fraction of asks answered within the window.
 - `t80`: the 80th-percentile response time.
 
-Cold start uses constants (`p=0.5`, `t80=20 s`). Stats come from one SQL query and are cached in-process for 5 minutes.
+Cold start uses constants (`p=0.5`, `t80=20 s`) until a person has 5 asks in that hour bucket (UTC hour of day). Stats come from one SQL query and are cached in-process for 5 minutes.
 
 ```python
 # shortcut: in-process TTL cache; move to a materialized view when asks exceed ~1M rows.
@@ -330,7 +330,7 @@ Cold start uses constants (`p=0.5`, `t80=20 s`). Stats come from one SQL query a
 ### 9.3 Planner (pure)
 
 ```
-remaining = deadline_at - now ;  window = remaining / max(1, tiers_left)
+remaining = deadline_at - now ;  window = remaining / max(1, tiers_left)   # tiers_left = ceil(eligible / max_fanout)
 k = smallest number of eligible approvers (ranked by p_answer desc, capped at max_fanout)
     such that  1 - Π(1 - p_i) ≥ TARGET_P (0.9)
 wait = min(max(t80 of chosen), window) ; next_action_at = now + wait
@@ -341,7 +341,7 @@ wait = min(max(t80 of chosen), window) ; next_action_at = now + wait
 ### 9.4 Rules that always hold
 
 - First valid answer wins. Everyone else asked gets "Handled by Raj ✓".
-- Two-person rule above `two_person_over`: two distinct approvals are needed, and one decline ends it.
+- Two-person rule above `two_person_over`: two distinct approvals are needed, and one decline ends it. The planner asks at least two people, and counter-offers aren't accepted (reply 1 or 2).
 - Authority is re-checked at answer time. An approval above the replier's current limit escalates again.
 - A counter-offer is in `amount`'s unit and must be more than 0 and less than the amount requested (D21). An invalid one is answered with "Counter must be a discount under $50" and the ask stays open.
 - No one is asked twice for the same decision.

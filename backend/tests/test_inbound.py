@@ -31,7 +31,8 @@ class Esc:
 @pytest.fixture
 async def esc(make_tree, add_member, session: AsyncSession) -> Esc:
     t: Tree = await make_tree("A")
-    t.agency.settings = {"contact_hours": None}  # any time, so tests don't depend on the clock
+    # Any time, so tests don't depend on the clock; one person per step, so order is testable.
+    t.agency.settings = {"contact_hours": None, "escalation": {"max_fanout": 1}}
     await session.commit()
     lee = await add_member(t.agency.id, ("location", t.location.id), LEE, "Lee", 50)
     raj = await add_member(t.agency.id, ("business", t.business.id), RAJ, "Raj", 500, role="owner")
