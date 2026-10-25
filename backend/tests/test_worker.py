@@ -255,3 +255,13 @@ async def test_expiry_is_emailed_to_whoever_was_asked() -> None:
     [notice] = ch.to("team@dealer.example")  # only Lee was asked, so one email
     assert "expired: nobody answered in time" in notice and "defer" in notice
     assert len(ch.to(w.lee)) == sms_before  # no SMS for news nobody has to act on
+
+
+async def test_max_people_caps_everyone_asked() -> None:
+    w, ch = await world({"escalation": {"max_fanout": 1, "max_people": 1}}), FakeChannel()
+    d = await new_decision(w, ch)
+    await shift(d, next_action_at=PAST)
+    await step_decisions(ch)  # Raj is eligible, but the decision may only ask one person
+    assert [to for to, _ in ch.sent] == [w.lee] and await asks(d) == 1
+    row = await get(d)
+    assert row.status == "pending" and row.next_action_at == row.deadline_at

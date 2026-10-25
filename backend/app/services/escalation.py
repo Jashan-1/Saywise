@@ -253,24 +253,29 @@ async def advance(session: AsyncSession, channel: Channel, decision: Decision) -
             return []
 
     by_key = {m.id: (m, p) for m, p in candidates}
+    asked_total = await session.scalar(
+        select(func.count()).where(DecisionAsk.decision_id == decision.id)
+    )
+    slots = settings.escalation.max_people - (asked_total or 0)
     remaining = decision.deadline_at - now
     needed = approvals_needed(decision, settings.escalation.two_person_over)
     max_segments = settings.sms.max_segments
     sent: list[DecisionAsk] = []
     wait = timedelta(0)
-    while by_key and not sent:  # replan without anyone whose SMS failed
+    while by_key and not sent and slots > 0:  # replan without anyone whose send failed
         stats = await history.approver_stats(
             session, [p.id for _, p in by_key.values()], remaining, now
         )
         step = plan_step(
             [Candidate(m.id, stats[p.id].p_answer, stats[p.id].t80) for m, p in by_key.values()],
             remaining,
-            settings.escalation.max_fanout,
+            min(settings.escalation.max_fanout, slots),
             needed,
         )
         wait = step.wait
         for key in step.ask:
             membership, person = by_key.pop(key)
+            slots -= 1
             ask = DecisionAsk(
                 decision_id=decision.id,
                 person_id=person.id,

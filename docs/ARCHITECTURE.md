@@ -210,6 +210,7 @@ code defaults → agency.settings → business.settings → location.settings
 | `deadlines.live_ms` | 30000 | 5 000 – 120 000 |
 | `deadlines.async_ms` | 3600000 | 60 000 – 7 days |
 | `escalation.max_fanout` | 3 | 1 – 10 |
+| `escalation.max_people` | 10 | 1 – 10. Total people asked per decision, across all steps |
 | `escalation.two_person_over` | null (off) | ≥ 0 |
 | `contact_hours` | every day `07:00-21:00` | When people may be texted, for members without their own. Location timezone; a window may cross midnight and belongs to the day it starts; `null` = any time (D18) |
 | `after_hours` | `"defer"` | `"defer"` \| `"on_call"` |

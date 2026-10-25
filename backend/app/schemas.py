@@ -93,7 +93,8 @@ class Deadlines(_In):
 
 
 class Escalation(_In):
-    max_fanout: int = Field(3, ge=1, le=10)
+    max_fanout: int = Field(3, ge=1, le=10)  # people asked at once, per step
+    max_people: int = Field(10, ge=1, le=10)  # people asked in total, per decision
     two_person_over: Money | None = None
 
 
